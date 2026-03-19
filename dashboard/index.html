@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Trading System — Dashboard</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: 'SF Mono', 'Menlo', 'Monaco', monospace;
+            background: #0d1117;
+            color: #c9d1d9;
+            padding: 20px;
+            font-size: 13px;
+        }
+
+        h1 { font-size: 16px; color: #58a6ff; margin-bottom: 20px; }
+        h2 { font-size: 12px; color: #8b949e; text-transform: uppercase;
+             letter-spacing: 1px; margin-bottom: 8px; }
+
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+            max-width: 1200px;
+        }
+
+        .card {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            padding: 16px;
+        }
+
+        .card.full-width { grid-column: 1 / -1; }
+
+        /* Circuit breaker banner */
+        #circuit-banner {
+            display: none;
+            background: #da3633;
+            color: white;
+            padding: 10px 16px;
+            border-radius: 6px;
+            margin-bottom: 16px;
+            font-weight: bold;
+        }
+
+        /* Connection status */
+        #status {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 11px;
+            background: #161b22;
+            border: 1px solid #30363d;
+            color: #8b949e;
+            margin-bottom: 16px;
+        }
+        #status.connected { border-color: #238636; color: #3fb950; }
+        #status.disconnected { border-color: #da3633; color: #f85149; }
+
+        table { width: 100%; border-collapse: collapse; }
+        th { text-align: left; color: #8b949e; font-weight: normal;
+             padding: 4px 8px; border-bottom: 1px solid #21262d; }
+        td { padding: 4px 8px; border-bottom: 1px solid #21262d; }
+        tr:last-child td { border-bottom: none; }
+
+        .positive { color: #3fb950; }
+        .negative { color: #f85149; }
+        .neutral  { color: #8b949e; }
+
+        .empty-state { color: #8b949e; text-align: center; padding: 20px; }
+
+        /* Risk gauges */
+        .gauge-row { display: flex; align-items: center; margin-bottom: 8px; }
+        .gauge-label { width: 160px; color: #8b949e; }
+        .gauge-bar { flex: 1; height: 6px; background: #21262d; border-radius: 3px;
+                     overflow: hidden; margin: 0 12px; }
+        .gauge-fill { height: 100%; background: #238636; border-radius: 3px;
+                      transition: width 0.3s; }
+        .gauge-fill.warning { background: #e3b341; }
+        .gauge-fill.danger  { background: #da3633; }
+        .gauge-value { width: 60px; text-align: right; }
+
+        /* Event log */
+        #event-log { max-height: 180px; overflow-y: auto; }
+        .event-row { display: flex; gap: 12px; padding: 3px 0;
+                     border-bottom: 1px solid #21262d; }
+        .event-time { color: #8b949e; min-width: 80px; }
+        .event-type { min-width: 80px; color: #58a6ff; }
+    </style>
+</head>
+<body>
+
+<div id="circuit-banner">
+    ⚠ CIRCUIT BREAKER ENGAGED — Daily loss limit reached. All trading halted.
+</div>
+
+<h1>Trading System</h1>
+<div id="status">● Connecting...</div>
+
+<div class="grid">
+
+    <!-- Positions -->
+    <div class="card">
+        <h2>Positions</h2>
+        <div id="positions-container">
+            <p class="empty-state">No open positions</p>
+        </div>
+    </div>
+
+    <!-- Risk -->
+    <div class="card">
+        <h2>Risk</h2>
+        <div id="risk-container">
+            <p class="empty-state">Loading...</p>
+        </div>
+    </div>
+
+    <!-- Recent Fills -->
+    <div class="card">
+        <h2>Recent Fills</h2>
+        <div id="fills-container">
+            <p class="empty-state">No fills yet — waiting for first signal</p>
+        </div>
+    </div>
+
+    <!-- System Events -->
+    <div class="card">
+        <h2>System Events</h2>
+        <div id="event-log"></div>
+    </div>
+
+</div>
+
+<script>
+    let ws;
+    let fills = [];
+    const MAX_FILLS = 50;
+    const MAX_EVENTS = 100;
+    let events = [];
+
+    function connect() {
+        const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        ws = new WebSocket(`${proto}//${location.host}/ws/dashboard`);
+
+        ws.onopen = () => {
+            document.getElementById('status').textContent = '● Connected';
+            document.getElementById('status').className = 'connected';
+        };
+
+        ws.onclose = () => {
+            document.getElementById('status').textContent = '● Disconnected — reconnecting...';
+            document.getElementById('status').className = 'disconnected';
+            setTimeout(connect, 3000);
+        };
+
+        ws.onerror = () => {
+            document.getElementById('status').textContent = '● Connection error';
+            document.getElementById('status').className = 'disconnected';
+        };
+
+        ws.onmessage = (e) => {
+            const data = JSON.parse(e.data);
+            render(data);
+        };
+    }
+
+    function render(data) {
+        renderPositions(data.positions || []);
+        renderRisk(data.risk || {});
+        renderFills(data.recent_fills || []);
+        renderEvents(data.system_events || [], data.risk_alerts || []);
+
+        // Circuit breaker banner
+        const cb = data.risk?.circuit_breaker;
+        document.getElementById('circuit-banner').style.display =
+            cb === 'TRIGGERED' ? 'block' : 'none';
+    }
+
+    function renderPositions(positions) {
+        const el = document.getElementById('positions-container');
+        if (!positions.length) {
+            el.innerHTML = '<p class="empty-state">No open positions — system running, waiting for signals</p>';
+            return;
+        }
+        el.innerHTML = `
+            <table>
+                <tr><th>Symbol</th><th>Qty</th><th>Entry</th><th>Current</th><th>P&L</th></tr>
+                ${positions.map(p => {
+                    const pnl = p.unrealized_pnl || 0;
+                    const cls = pnl > 0 ? 'positive' : pnl < 0 ? 'negative' : 'neutral';
+                    return `<tr>
+                        <td>${p.symbol}</td>
+                        <td>${p.quantity > 0 ? '+' : ''}${p.quantity}</td>
+                        <td>$${(p.avg_price || 0).toFixed(2)}</td>
+                        <td>$${(p.current_price || 0).toFixed(2)}</td>
+                        <td class="${cls}">${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}</td>
+                    </tr>`;
+                }).join('')}
+            </table>`;
+    }
+
+    function renderRisk(risk) {
+        const el = document.getElementById('risk-container');
+        if (!risk.max_daily_loss_pct) { el.innerHTML = '<p class="empty-state">Loading...</p>'; return; }
+
+        const lossPct = (risk.daily_loss_pct || 0) * 100;
+        const maxPct = (risk.max_daily_loss_pct || 1) * 100;
+        const fillPct = Math.min(100, (lossPct / maxPct) * 100);
+        const fillClass = fillPct > 80 ? 'danger' : fillPct > 50 ? 'warning' : '';
+
+        el.innerHTML = `
+            <div class="gauge-row">
+                <span class="gauge-label">Daily Loss</span>
+                <div class="gauge-bar"><div class="gauge-fill ${fillClass}" style="width:${fillPct}%"></div></div>
+                <span class="gauge-value ${fillPct > 80 ? 'negative' : ''}">${lossPct.toFixed(2)}%</span>
+            </div>
+            <div class="gauge-row">
+                <span class="gauge-label">Available Capital</span>
+                <div class="gauge-bar"><div class="gauge-fill" style="width:100%"></div></div>
+                <span class="gauge-value">$${(risk.available_capital || 0).toLocaleString()}</span>
+            </div>
+            <div style="margin-top:8px;color:${risk.circuit_breaker === 'TRIGGERED' ? '#f85149' : '#3fb950'}">
+                Circuit Breaker: ${risk.circuit_breaker || 'NORMAL'}
+            </div>`;
+    }
+
+    function renderFills(newFills) {
+        fills = [...newFills, ...fills].slice(0, MAX_FILLS);
+        const el = document.getElementById('fills-container');
+        if (!fills.length) {
+            el.innerHTML = '<p class="empty-state">No fills yet — waiting for first signal</p>';
+            return;
+        }
+        el.innerHTML = `
+            <table>
+                <tr><th>Time</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Price</th><th>Strategy</th></tr>
+                ${fills.slice(0, 20).map(f => `<tr>
+                    <td class="neutral">${f.timestamp ? f.timestamp.slice(11, 19) : '—'}</td>
+                    <td>${f.symbol}</td>
+                    <td class="${f.side === 'buy' ? 'positive' : 'negative'}">${f.side.toUpperCase()}</td>
+                    <td>${f.quantity}</td>
+                    <td>$${(f.price || 0).toFixed(2)}</td>
+                    <td class="neutral">${f.strategy}</td>
+                </tr>`).join('')}
+            </table>`;
+    }
+
+    function renderEvents(sysEvents, riskAlerts) {
+        const now = new Date().toLocaleTimeString();
+        for (const e of [...riskAlerts, ...sysEvents]) {
+            events.unshift({ time: now, type: e.type || e.alert_type, msg: e.message });
+        }
+        events = events.slice(0, MAX_EVENTS);
+
+        const el = document.getElementById('event-log');
+        if (!events.length) { el.innerHTML = '<p class="empty-state">No events yet</p>'; return; }
+        el.innerHTML = events.map(e =>
+            `<div class="event-row">
+                <span class="event-time">${e.time}</span>
+                <span class="event-type">${e.type}</span>
+                <span>${e.msg}</span>
+            </div>`
+        ).join('');
+    }
+
+    connect();
+</script>
+</body>
+</html>
