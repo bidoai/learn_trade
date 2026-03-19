@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+*.egg-info/
+dist/
+build/
+
+# Environment — NEVER commit credentials
+.env
+
+# IDE
+.idea/
+.vscode/
+
+# Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Data / DB files
+*.db
+*.sqlite
+
+# Claude Code internal
+.claude/
