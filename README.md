@@ -44,11 +44,12 @@ and the failure modes that cause most strategies to break in production.
 10. [Transaction Costs and Slippage](#10-transaction-costs-and-slippage)
 11. [Strategy Capacity](#11-strategy-capacity)
 12. [Observability and Monitoring](#12-observability-and-monitoring)
-13. [The Math](#13-the-math)
-14. [What Real Hedge Funds Look Like](#14-what-real-hedge-funds-look-like)
-15. [Running the System](#15-running-the-system)
-16. [Next Steps](#16-next-steps)
-17. [What Would Be Required for Production](#17-what-would-be-required-for-production)
+13. [Alpha Monitoring in Production](#13-alpha-monitoring-in-production)
+14. [The Math](#14-the-math)
+15. [What Real Hedge Funds Look Like](#15-what-real-hedge-funds-look-like)
+16. [Running the System](#16-running-the-system)
+17. [Next Steps](#17-next-steps)
+18. [What Would Be Required for Production](#18-what-would-be-required-for-production)
 
 ---
 
@@ -403,6 +404,27 @@ uncorrelated *strategies*, not just securities.
 correlated during market stress — when everyone rushes to the exits, all momentum
 strategies crash simultaneously.
 
+### Gross vs. Net Exposure
+
+A PM manages two exposure metrics simultaneously — the current system tracks positions but does not compute either:
+
+```
+Net Exposure  = (Long market value - Short market value) / NAV
+Gross Exposure = (Long market value + |Short market value|) / NAV
+
+Example: $60M long, $40M short, $100M NAV
+  Net  = 20%   → directional market bet
+  Gross = 100% → total leverage deployed
+
+Typical hedge fund targets:
+  Net:   -20% to +30%   (mostly market-neutral)
+  Gross:  80% to 150%   (1–1.5x leverage)
+```
+
+High gross with low net = diversified, market-neutral book. High net = directional bet on market direction. A PM manages both: gross drives risk consumption, net drives market sensitivity.
+
+**Why this matters for this system:** the `strategy_weights` config allocates capital, not risk. A 40% capital weight to momentum in a trending market may consume 60% of realized portfolio variance. Tracking gross/net makes this visible.
+
 ### Limitations of Fixed Weights
 
 Fixed weights ignore:
@@ -415,6 +437,27 @@ Fixed weights ignore:
 
 In practice, fixed weights mean your realized risk contribution per strategy varies
 continuously even though the nominal allocation is constant.
+
+### Rebalancing Discipline
+
+The system is silent on *when* to rebalance, which is a significant real-world gap. Three approaches:
+
+```
+1. Calendar-based:   Rebalance at market open every day / week / month
+                     Pro: predictable, simple
+                     Con: rebalances even when drift is negligible (wastes turnover)
+
+2. Threshold-based:  Rebalance when any weight drifts > X% from target
+                     Pro: only trades when necessary
+                     Con: requires continuous monitoring
+
+3. Volatility-based: Rebalance when a strategy's realized vol exceeds its
+                     risk budget target by Y%
+                     Pro: directly responds to risk consumption changes
+                     Con: more complex to implement
+```
+
+**Practical rule of thumb:** for daily-bar strategies, daily rebalancing is excessive (~25% annual cost at 10 bps). A 5% threshold trigger or weekly calendar rebalance is a better starting point.
 
 ### Suggested Improvement: Volatility Scaling
 
@@ -499,6 +542,32 @@ risk-adjusted return.
 
 ## 6. Risk Management
 
+### Risk Budget Framework
+
+The most important PM-level risk concept missing from this system is the **risk budget**. Capital weights (the current approach) are not risk weights — a 40% capital allocation to momentum can consume 60% of portfolio variance during a trending market.
+
+The correct framing is to allocate *volatility*, not capital:
+
+```
+Total Portfolio Vol Target: 10% annualized
+
+Strategy risk budget:
+  Momentum       : target 4% vol  (40% of risk budget)
+  Mean Reversion : target 3% vol  (30% of risk budget)
+  ML Strategy    : target 3% vol  (30% of risk budget)
+
+Position scaling per strategy:
+  scale_factor = target_vol / realized_vol_20d
+  sized_capital = base_capital × scale_factor
+
+Effect: when momentum becomes more volatile, its position sizes shrink
+automatically, keeping its risk contribution constant at 4%.
+```
+
+This is **volatility targeting** — the most common real-world portfolio construction approach. It directly addresses the limitation of fixed weights (see below) and keeps realized portfolio volatility close to the target even as individual strategy volatilities shift.
+
+**Implementation note:** `realized_vol_20d` should be computed from strategy-level P&L, not from the underlying asset price, to capture signal sizing effects.
+
 ### Pre-Trade Risk Checks
 
 Before every order reaches the broker, the risk engine runs synchronous checks:
@@ -509,6 +578,38 @@ Before every order reaches the broker, the risk engine runs synchronous checks:
 | Position size | No single position > X% of capital | `position_value > max_position_pct × capital` |
 | Concentration | No single symbol > Y% of exposure | `symbol_exposure > max_concentration_pct × capital` |
 | Capital check | Sufficient buying power | `position_value > available_capital` |
+
+### Drawdown Management Protocol
+
+The circuit breaker handles intraday losses, but the system has no response to persistent multi-day drawdowns. A PM needs a formal drawdown response framework:
+
+```
+Drawdown Level    │ Action
+──────────────────┼────────────────────────────────────────────────────────
+< 5%              │ Normal operations. Monitor for factor crowding signals.
+5–10%             │ Review position sizing. Check for regime shift.
+                  │ Reduce gross exposure by 25%.
+10–15%            │ Halt new strategy activations. Reduce all positions
+                  │ by 50%. Convene risk review.
+15–20%            │ Move to defensive mode. Exit to cash except hedges.
+                  │ Issue investor notice if externally managed.
+> 20%             │ Full stop. Return capital or restructure mandate.
+──────────────────┴────────────────────────────────────────────────────────
+```
+
+**Why this matters:** the circuit breaker resets daily — a fund can lose 1.9% per day for 10 consecutive days and never trigger it. A drawdown protocol catches persistent deterioration.
+
+**Drawdown recovery math:** a -20% drawdown requires +25% to recover. A -40% drawdown requires +67%. The asymmetry means cutting losses early is far cheaper than riding a drawdown hoping for mean reversion.
+
+```python
+# Minimum to add to this system:
+def check_portfolio_drawdown(equity_curve: list[float]) -> float:
+    peak = max(equity_curve)
+    current = equity_curve[-1]
+    return (peak - current) / peak   # drawdown as fraction of peak
+
+# In run_live.py, check this at end of each day and apply the protocol above
+```
 
 ### The Circuit Breaker
 
@@ -559,6 +660,34 @@ measure for risk management.
 - **Sharpe ratio:** return per unit of volatility
 - **Calmar ratio:** annualized return / max drawdown
 - **Factor exposures:** beta to market, size, value, momentum factors
+
+### Stress Testing Scenarios
+
+VaR measures typical daily losses. Stress tests ask: *what happens in specific named crises?* Real funds run both:
+
+```
+Historical scenarios:
+  2020 COVID crash (Feb–Mar 2020) :  S&P -34% in 23 trading days
+  2008 GFC (Sep–Nov 2008)         :  S&P -40%, VIX peak 89
+  2000 dot-com unwind             :  NASDAQ -78% over 2.5 years
+  1998 LTCM crisis                :  liquidity seizure, spread blowout
+
+Hypothetical scenarios:
+  Rates +200bps overnight         :  bond proxy stocks (utilities, REITs) -15–20%
+  VIX spike from 15 to 80        :  short-vol strategies catastrophic loss
+  USD +10% in one week            :  export-heavy equities -8%
+  Oil -50%                        :  energy sector -30%, airlines +15%
+
+For each scenario, answer:
+  1. What is my estimated P&L?
+  2. At what point does my circuit breaker / drawdown protocol trigger?
+  3. Which strategies benefit, which suffer?
+  4. Am I net long or short the stress scenario?
+```
+
+**CCR analogy:** this is the stress testing you already know from FRTB and CCAR — the difference is you're applying it to a long/short equity book rather than a derivatives portfolio. The methodology is identical.
+
+**Missing from this system:** no scenario engine. The backtest infrastructure could support this if a `StressScenarioRunner` replayed shocked price series through the existing strategy stack.
 
 ### Drawdown vs. CCR Exposure
 
@@ -863,7 +992,94 @@ that goes undetected until 3pm can mean hours of unintended exposure.
 
 ---
 
-## 13. The Math
+## 13. Alpha Monitoring in Production
+
+A backtest tells you a strategy *was* profitable. Live monitoring tells you whether it *still is*. Detecting alpha decay in real-time is the PM's most important ongoing responsibility — and entirely absent from most learning systems.
+
+### The Information Coefficient (IC)
+
+The IC measures whether a signal actually predicts what it claims to predict:
+
+```
+IC_t = correlation(signal_t, return_{t+1})
+
+Interpretation:
+  IC = 0.00  → signal has no predictive value
+  IC = 0.05  → weak but tradeable (typical for well-researched signals)
+  IC = 0.10  → strong signal (uncommon, probably decaying)
+  IC > 0.15  → suspicious (likely overfitting or look-ahead bias)
+
+IC is measured on a rolling window (typically 60–90 days).
+A signal alive in backtest with live IC consistently near 0 has decayed.
+```
+
+### Live Strategy Health Dashboard
+
+Track the following per strategy on a rolling 90-day window:
+
+```
+┌─────────────────────────────────┬────────────────────────────┬────────────┐
+│ Metric                          │ Healthy                    │ Act        │
+├─────────────────────────────────┼────────────────────────────┼────────────┤
+│ Rolling hit rate (% profitable) │ > 52%                      │ < 48%      │
+│ Rolling Sharpe (90-day)         │ > 0.5                      │ < 0.3      │
+│ Information coefficient (IC)    │ > 0.03                     │ < 0.01     │
+│ IC t-statistic                  │ > 2.0 (significant)        │ < 1.5      │
+│ Max drawdown (rolling 6-month)  │ Within historical range    │ New low    │
+└─────────────────────────────────┴────────────────────────────┴────────────┘
+```
+
+**Action thresholds:**
+- One metric below threshold: log warning, increase monitoring frequency
+- Two metrics below threshold: reduce strategy allocation by 50%
+- Three metrics below threshold: halt strategy, flag for research review
+
+### IC Calculation (to add to PerformanceTracker)
+
+```python
+import numpy as np
+from scipy.stats import spearmanr
+
+def compute_ic(signals: list[float], next_returns: list[float]) -> float:
+    """Spearman rank IC — more robust than Pearson for fat-tailed returns."""
+    ic, _ = spearmanr(signals, next_returns)
+    return ic
+
+def rolling_ic(signal_history: list[float],
+               return_history: list[float],
+               window: int = 63) -> list[float]:
+    return [
+        compute_ic(signal_history[i:i+window], return_history[i:i+window])
+        for i in range(len(signal_history) - window)
+    ]
+```
+
+### Alpha Decay vs. Regime Change
+
+Not all IC drops are permanent. Distinguish:
+
+```
+Alpha decay (permanent):
+  - IC declines gradually over months/years
+  - Strategy is over-crowded or arbitraged away
+  - Action: retire signal, research new one
+
+Regime change (temporary):
+  - IC drops sharply in a specific market event
+  - Strategy may recover when regime normalizes
+  - Action: reduce allocation, monitor for recovery
+
+Overfitting (was never real):
+  - Strategy worked in backtest, IC near zero from day 1 live
+  - Backtest was overfit to in-sample noise
+  - Action: halt immediately, review backtest methodology
+```
+
+**This is the most common live trading failure mode.** A strategy that looked good in backtest posts IC ≈ 0 for the first 90 days. Without this monitoring, a PM has no systematic way to distinguish "the strategy needs more time" from "the backtest was never valid."
+
+---
+
+## 14. The Math
 
 ### Returns Arithmetic
 
@@ -972,7 +1188,7 @@ implies extreme volatility. Most funds use 20-25% of Kelly.
 
 ---
 
-## 14. What Real Hedge Funds Look Like
+## 15. What Real Hedge Funds Look Like
 
 ### The Technology Stack at a Quant Fund
 
@@ -986,6 +1202,32 @@ implies extreme volatility. Most funds use 20-25% of Kelly.
 | Risk | Custom Python | Axioma, BARRA, or in-house |
 | Languages | Python | Python (research), C++/Java (execution) |
 | Latency | Seconds | Microseconds to milliseconds |
+
+### Fee Structure and Incentive Effects
+
+The fee structure fundamentally changes what "good performance" means and is often omitted from learning systems:
+
+```
+Management fee:   1–2% of AUM per year (charged regardless of performance)
+Performance fee:  15–20% of profits above the hurdle rate
+High-water mark:  Performance fee only charged on NEW profit highs —
+                  the manager absorbs losses first before earning carry
+
+Example ($100M fund, 2% / 20% structure, 5% hurdle):
+  Year 1: +20% gross → fees = 2% mgmt + 20% × (20%-5%) perf = 5% total
+           Net return to investors = +15%
+  Year 2: -10% gross → fees = 2% mgmt only (HWM not recovered)
+           Net return = -12%
+  Year 3: +15% gross → no perf fee until prior HWM recovered
+           Net return = +13%
+
+Break-even gross alpha required just to cover fees (2/20): ~4-5% annualized.
+A strategy with 1.0 gross Sharpe may deliver ~0.6 net Sharpe after fees.
+```
+
+**Implication for signal quality:** a 2/20 fund needs approximately 2.5x the gross alpha of a low-cost ETF to justify its fee structure. Minimum institutional quality bar is net Sharpe > 0.8–1.0 after all fees and costs.
+
+**HWM creates PM risk incentives:** after a drawdown, a PM is working "for free" until the HWM is recovered. This creates pressure to either take more risk (lottery ticket behavior) or return capital. Understanding this incentive is essential for evaluating fund risk-taking.
 
 ### The Quant Fund Workflow
 
@@ -1008,6 +1250,42 @@ Idea → Signal construction → Backtest → Paper trading → Live (small size
 - Manage portfolio-level risk (factor exposures, net beta)
 - Make sizing decisions based on risk budget
 - Communicate with investors about attribution
+
+### Investor Reporting
+
+A PM's external responsibility is investor communication. Monthly and quarterly tearsheets cover a standard set of metrics that LPs use to evaluate performance:
+
+```
+Performance (net of all fees):
+  MTD / YTD / ITD returns
+  Benchmark comparison (S&P 500, 60/40, risk-free rate)
+
+Risk metrics:
+  Annualized Sharpe ratio       (target: > 1.0 net)
+  Sortino ratio                 (like Sharpe, but only penalizes downside vol)
+  Calmar ratio                  (annualized return / max drawdown)
+  Maximum drawdown (%)          (most watched by investors)
+  Drawdown duration (days)      (time to recovery)
+  Current drawdown              (if in one: how deep, how long)
+
+Exposure:
+  Gross / net exposure over time
+  Sector breakdown
+  Geographic breakdown (if applicable)
+
+Attribution:
+  Strategy-level P&L contribution
+  Factor attribution (beta, size, value, momentum exposures)
+  Top 5 contributors / detractors
+
+Forward-looking:
+  Risk budget utilization
+  Any material changes to strategy or team
+```
+
+**What LPs care about most:** maximum drawdown and drawdown duration. A fund with Sharpe 1.5 but a -25% max drawdown is harder to stay invested in than a fund with Sharpe 1.0 and -12% max drawdown. Behavioral staying power matters as much as raw numbers.
+
+**This system gap:** the current `PerformanceTracker` (noted as in-progress) needs to compute all of these. Attribution is the most important gap — without it, a PM cannot explain *why* returns occurred, which is the minimum required for investor communication.
 
 ### Signal Categories
 
@@ -1039,7 +1317,7 @@ Things that are new:
 
 ---
 
-## 15. Running the System
+## 16. Running the System
 
 ### Setup
 
@@ -1097,7 +1375,7 @@ trading_system/
 
 ---
 
-## 16. Next Steps
+## 17. Next Steps
 
 ### Immediate (to complete the system)
 1. **`ml/` module** — `FeatureBuilder` with cutoff assertion, `TimeSeriesSplit`, `MLStrategy`
@@ -1138,7 +1416,7 @@ trading_system/
 
 ---
 
-## 17. What Would Be Required for Production
+## 18. What Would Be Required for Production
 
 To move toward a real trading system:
 
