@@ -101,18 +101,22 @@ class BacktestRunner:
         )
         self.oms.set_execution(self.executor)
 
-    async def run(self) -> BacktestResult:
+    async def run(self, bars: Optional[list] = None) -> BacktestResult:
         """
         Run the backtest. Returns a BacktestResult with performance metrics.
+
+        Pass pre-loaded bars to skip the data fetch (used by StrategyOptimizer
+        to avoid re-downloading data on every optimization trial).
         """
         # CRITICAL: reset strategy state before every run
         self.strategy.reset()
 
-        loader = HistoricalLoader(
-            api_key=self.settings.alpaca.api_key,
-            secret_key=self.settings.alpaca.secret_key,
-        )
-        bars = loader.load(self.symbol, self.start, self.end)
+        if bars is None:
+            loader = HistoricalLoader(
+                api_key=self.settings.alpaca.api_key,
+                secret_key=self.settings.alpaca.secret_key,
+            )
+            bars = loader.load(self.symbol, self.start, self.end)
 
         if not bars:
             raise ValueError(f"No data for {self.symbol} between {self.start} and {self.end}")
