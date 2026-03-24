@@ -83,11 +83,27 @@ class DashboardSettings(BaseModel):
     update_interval_sec: float = 1.0
 
 
+class FIXSettings(BaseModel):
+    """
+    FIX 4.2 session configuration.
+
+    Defaults point to the in-process simulator used in tests.
+    For a real broker, override host/port and comp IDs via env vars:
+        FIX__HOST=fix.broker.com FIX__PORT=9823
+    """
+    host: str = "127.0.0.1"
+    port: int = 8888
+    sender_comp_id: str = "CLIENT"
+    target_comp_id: str = "SERVER"
+    heartbeat_interval: int = 30
+
+
 class Settings(BaseSettings):
     alpaca: AlpacaSettings
     risk: RiskSettings = RiskSettings()
     strategy: StrategySettings = StrategySettings()
     dashboard: DashboardSettings = DashboardSettings()
+    fix: FIXSettings = FIXSettings()
     db_path: str = "trading.db"
     log_level: str = "INFO"
 

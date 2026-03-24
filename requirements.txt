@@ -15,6 +15,9 @@ python-dotenv>=1.0.0
 # Optimization
 optuna>=3.5.0
 
+# FIX protocol
+simplefix>=1.0.14
+
 # Testing
 pytest>=7.4.0
 pytest-asyncio>=0.23.0

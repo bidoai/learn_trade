@@ -7,37 +7,20 @@ Each item has been reviewed and consciously deferred — not forgotten.
 
 ## P2 — High Value, Phase 2
 
-### FIX Protocol Implementation
-**What:** Implement a FIX (Financial Information eXchange) session layer and order router
-as an alternative execution transport to Alpaca REST.
-**Why:** FIX is the industry-standard messaging protocol used by every professional broker
-and exchange. Understanding it is career-critical for anyone working in hedge fund technology.
-**Pros:** Deep dive into the actual wire protocol; makes the system closer to production-grade.
-**Cons:** Significant complexity; requires a FIX engine library (e.g., QuickFIX/Python);
-needs a FIX-capable counterparty to test against (can use a simulator).
-**Context:** The execution layer is already abstracted behind an `ExecutionEngine` interface.
-Adding FIX means implementing a new `FIXExecutor` class. Start by reading the FIX 4.2/4.4 spec.
-**Effort:** L (human: 2 weeks / CC: ~2 hours)
-**Priority:** P2
-**Depends on:** Core system complete and stable
+### ~~FIX Protocol Implementation~~ ✓ DONE
+**Shipped:** `execution/fix.py` — `FIXExecutor(ExecutionEngine)` using FIX 4.2 over TCP.
+`FIXSession` manages sequence numbers and header building. Full message handling:
+Logon/Logout, Heartbeat, NewOrderSingle, OrderCancelRequest, ExecutionReport (fills/rejects).
+`tests/fixtures/fix_simulator.py` — in-process simulator (immediate fills, partial fills,
+rejects). 13 passing tests covering all order lifecycle paths.
 
 ---
 
-### Strategy Optimization Framework
-**What:** A system to automatically tune strategy parameters (moving average windows,
-ML hyperparameters, etc.) using grid search or Bayesian optimization over historical data.
-**Why:** Teaches the quant research workflow of parameter discovery. Walk-forward validation
-is a critical concept — prevents in-sample overfitting that makes backtests look great but
-live trading fail.
-**Pros:** Significant learning value; teaches the full quant research cycle.
-**Cons:** Must implement walk-forward validation correctly or results will be meaningless.
-Risk of overfitting is real and instructive when you experience it.
-**Context:** The backtest runner is the foundation. `StrategyOptimizer` wraps it with a
-parameter grid, runs N backtests, and aggregates Sharpe ratios. Use Optuna for Bayesian
-optimization. Always use out-of-sample test sets.
-**Effort:** M (human: 1 week / CC: ~30 min)
-**Priority:** P2
-**Depends on:** Backtest engine complete
+### ~~Strategy Optimization Framework~~ ✓ DONE
+**Shipped:** `backtest/optimizer.py` — `StrategyOptimizer` with Optuna Bayesian search,
+walk-forward expanding-window validation, IS vs OOS Sharpe overfitting detection.
+`scripts/optimize.py` — CLI entry point for momentum and mean-reversion strategies.
+11 passing tests in `tests/test_optimizer.py`.
 
 ---
 
