@@ -111,6 +111,63 @@ async def get_risk() -> JSONResponse:
     })
 
 
+@app.get("/api/greeks")
+async def get_greeks() -> JSONResponse:
+    """Portfolio-level Greeks. Returns mock data for now."""
+    return JSONResponse({
+        "portfolio": {
+            "dv01": -124500,       # USD per bp
+            "cs01": -45200,        # credit spread sensitivity
+            "delta": 2847000,      # equity delta (USD)
+            "vega": 156000,        # per vol point
+            "gamma": 12400,
+        },
+        "by_book": [
+            {"book": "APEX_RATES_SWAPS", "dv01": -98200, "cs01": 0, "delta": 0, "vega": 0},
+            {"book": "APEX_RATES_GOV",   "dv01": -26300, "cs01": 0, "delta": 0, "vega": 0},
+            {"book": "APEX_EQ_MM",       "dv01": 0, "cs01": 0, "delta": 1840000, "vega": 98000},
+            {"book": "APEX_CREDIT_IG",   "dv01": 0, "cs01": -45200, "delta": 0, "vega": 0},
+            {"book": "APEX_DERIV",       "dv01": 0, "cs01": 0, "delta": 1007000, "vega": 58000},
+        ]
+    })
+
+
+@app.get("/api/ccr")
+async def get_ccr() -> JSONResponse:
+    """Counterparty credit risk / SA-CCR EAD and limit utilization."""
+    return JSONResponse({
+        "summary": {
+            "total_ead_mm": 284.7,
+            "total_limit_mm": 500.0,
+            "utilization_pct": 56.9,
+            "counterparties_near_limit": 1,
+        },
+        "counterparties": [
+            {"name": "Goldman Sachs",  "ead_mm": 87.4, "limit_mm": 150.0, "utilization_pct": 58.3, "pfe_97_5": 124.2, "rating": "A+"},
+            {"name": "JPMorgan",       "ead_mm": 72.1, "limit_mm": 150.0, "utilization_pct": 48.1, "pfe_97_5": 98.7,  "rating": "AA-"},
+            {"name": "Deutsche Bank",  "ead_mm": 63.8, "limit_mm": 75.0,  "utilization_pct": 85.1, "pfe_97_5": 84.3,  "rating": "BBB+"},
+            {"name": "BNP Paribas",    "ead_mm": 41.2, "limit_mm": 75.0,  "utilization_pct": 54.9, "pfe_97_5": 56.4,  "rating": "A"},
+            {"name": "HSBC",           "ead_mm": 20.2, "limit_mm": 50.0,  "utilization_pct": 40.4, "pfe_97_5": 28.1,  "rating": "AA-"},
+        ]
+    })
+
+
+@app.get("/api/pnl")
+async def get_pnl_attribution() -> JSONResponse:
+    """P&L attribution by book and instrument type."""
+    return JSONResponse({
+        "daily_total": 1847200,
+        "ytd_total": 24680000,
+        "by_book": [
+            {"book": "APEX_RATES_SWAPS", "daily_pnl": 824000,  "ytd_pnl": 11200000},
+            {"book": "APEX_EQ_MM",       "daily_pnl": 412000,  "ytd_pnl": 5600000},
+            {"book": "APEX_FX_G10",      "daily_pnl": 287000,  "ytd_pnl": 3840000},
+            {"book": "APEX_CREDIT_IG",   "daily_pnl": 198000,  "ytd_pnl": 2640000},
+            {"book": "APEX_DERIV",       "daily_pnl": 126200,  "ytd_pnl": 1400000},
+        ]
+    })
+
+
 @app.get("/")
 async def dashboard() -> FileResponse:
     return FileResponse("dashboard/index.html")

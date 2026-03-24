@@ -83,6 +83,24 @@
         .gauge-fill.danger  { background: #da3633; }
         .gauge-value { width: 60px; text-align: right; }
 
+        /* Greeks table — highlight large DV01 */
+        .large-dv01 { color: #f85149; }
+
+        /* CCR gauge rows */
+        .ccr-row { display: flex; align-items: center; margin-bottom: 10px; gap: 12px; }
+        .ccr-name { width: 130px; color: #c9d1d9; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .ccr-ead  { width: 80px; text-align: right; color: #8b949e; }
+        .ccr-bar  { flex: 1; height: 8px; background: #21262d; border-radius: 4px; overflow: hidden; }
+        .ccr-fill { height: 100%; border-radius: 4px; transition: width 0.4s; }
+        .ccr-fill.green  { background: #238636; }
+        .ccr-fill.yellow { background: #e3b341; }
+        .ccr-fill.red    { background: #da3633; }
+        .ccr-pct  { width: 46px; text-align: right; }
+        .ccr-rating { width: 44px; text-align: right; color: #8b949e; font-size: 11px; }
+
+        /* P&L table totals row */
+        .pnl-total td { border-top: 1px solid #30363d; font-weight: 700; color: #c9d1d9; }
+
         /* Event log */
         #event-log { max-height: 180px; overflow-y: auto; }
         .event-row { display: flex; gap: 12px; padding: 3px 0;
@@ -130,6 +148,31 @@
     <div class="card">
         <h2>System Events</h2>
         <div id="event-log"></div>
+    </div>
+
+    <!-- Portfolio Greeks -->
+    <div class="card full-width">
+        <h2>Portfolio Greeks</h2>
+        <div id="greeks-container">
+            <p class="empty-state">Loading...</p>
+        </div>
+    </div>
+
+    <!-- CCR Limit Utilization -->
+    <div class="card full-width">
+        <h2>CCR Limit Utilization</h2>
+        <div id="ccr-header" style="margin-bottom:12px;color:#8b949e;font-size:12px;"></div>
+        <div id="ccr-container">
+            <p class="empty-state">Loading...</p>
+        </div>
+    </div>
+
+    <!-- P&L Attribution -->
+    <div class="card full-width">
+        <h2>P&amp;L Attribution</h2>
+        <div id="pnl-container">
+            <p class="empty-state">Loading...</p>
+        </div>
     </div>
 
 </div>
@@ -267,6 +310,161 @@
     }
 
     connect();
+
+    // -----------------------------------------------------------------------
+    // Derivatives panels — polled via REST (not WebSocket)
+    // -----------------------------------------------------------------------
+
+    function fmtNum(v) {
+        if (v == null) return '—';
+        const abs = Math.abs(v);
+        if (abs >= 1_000_000) return (v / 1_000_000).toFixed(2) + 'M';
+        if (abs >= 1_000)     return (v / 1_000).toFixed(1) + 'k';
+        return v.toLocaleString();
+    }
+
+    function pnlClass(v) {
+        return v > 0 ? 'positive' : v < 0 ? 'negative' : 'neutral';
+    }
+
+    // --- Greeks ---
+
+    async function fetchGreeks() {
+        try {
+            const res = await fetch('/api/greeks');
+            const data = await res.json();
+            renderGreeks(data);
+        } catch (_) { /* silently skip on error */ }
+    }
+
+    function renderGreeks(data) {
+        const el = document.getElementById('greeks-container');
+        const port = data.portfolio || {};
+        const books = data.by_book || [];
+
+        const dv01Cls = Math.abs(port.dv01 || 0) > 100000 ? 'large-dv01' : '';
+
+        el.innerHTML = `
+            <div style="display:flex;gap:24px;margin-bottom:14px;flex-wrap:wrap;">
+                <div><span style="color:#8b949e;font-size:10px;text-transform:uppercase;letter-spacing:0.8px;">DV01</span>
+                     <div class="${dv01Cls}" style="font-size:15px;margin-top:2px;">${fmtNum(port.dv01)}</div></div>
+                <div><span style="color:#8b949e;font-size:10px;text-transform:uppercase;letter-spacing:0.8px;">CS01</span>
+                     <div style="font-size:15px;margin-top:2px;">${fmtNum(port.cs01)}</div></div>
+                <div><span style="color:#8b949e;font-size:10px;text-transform:uppercase;letter-spacing:0.8px;">Delta</span>
+                     <div style="font-size:15px;margin-top:2px;">${fmtNum(port.delta)}</div></div>
+                <div><span style="color:#8b949e;font-size:10px;text-transform:uppercase;letter-spacing:0.8px;">Vega</span>
+                     <div style="font-size:15px;margin-top:2px;">${fmtNum(port.vega)}</div></div>
+                <div><span style="color:#8b949e;font-size:10px;text-transform:uppercase;letter-spacing:0.8px;">Gamma</span>
+                     <div style="font-size:15px;margin-top:2px;">${fmtNum(port.gamma)}</div></div>
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Book</th>
+                        <th style="text-align:right;">DV01 (USD/bp)</th>
+                        <th style="text-align:right;">CS01</th>
+                        <th style="text-align:right;">Delta (USD)</th>
+                        <th style="text-align:right;">Vega</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${books.map(b => {
+                        const dv01Cls = Math.abs(b.dv01) > 50000 ? 'negative' : 'neutral';
+                        return `<tr>
+                            <td>${b.book}</td>
+                            <td style="text-align:right;" class="${dv01Cls}">${b.dv01 !== 0 ? fmtNum(b.dv01) : '—'}</td>
+                            <td style="text-align:right;" class="${b.cs01 < 0 ? 'negative' : 'neutral'}">${b.cs01 !== 0 ? fmtNum(b.cs01) : '—'}</td>
+                            <td style="text-align:right;" class="${b.delta > 0 ? 'positive' : 'neutral'}">${b.delta !== 0 ? fmtNum(b.delta) : '—'}</td>
+                            <td style="text-align:right;" class="${b.vega > 0 ? 'positive' : 'neutral'}">${b.vega !== 0 ? fmtNum(b.vega) : '—'}</td>
+                        </tr>`;
+                    }).join('')}
+                </tbody>
+            </table>`;
+    }
+
+    // --- CCR ---
+
+    async function fetchCCR() {
+        try {
+            const res = await fetch('/api/ccr');
+            const data = await res.json();
+            renderCCR(data);
+        } catch (_) { /* silently skip */ }
+    }
+
+    function renderCCR(data) {
+        const summary = data.summary || {};
+        const cps = data.counterparties || [];
+
+        const hdrEl = document.getElementById('ccr-header');
+        const utilCls = summary.utilization_pct > 80 ? 'negative' : summary.utilization_pct > 60 ? 'warning' : 'positive';
+        hdrEl.innerHTML = `Total EAD: <strong>$${(summary.total_ead_mm || 0).toFixed(1)}MM</strong>` +
+            ` / $${(summary.total_limit_mm || 0).toFixed(1)}MM limit` +
+            ` &nbsp;|&nbsp; Utilization: <strong class="${utilCls}">${(summary.utilization_pct || 0).toFixed(1)}%</strong>` +
+            (summary.counterparties_near_limit > 0
+                ? ` &nbsp;|&nbsp; <span class="negative">${summary.counterparties_near_limit} counterparty near limit</span>`
+                : '');
+
+        const el = document.getElementById('ccr-container');
+        el.innerHTML = cps.map(cp => {
+            const pct = cp.utilization_pct;
+            const colorCls = pct > 80 ? 'red' : pct > 60 ? 'yellow' : 'green';
+            const pctCls   = pct > 80 ? 'negative' : pct > 60 ? 'warning' : 'positive';
+            return `<div class="ccr-row">
+                <span class="ccr-name" title="${cp.name}">${cp.name}</span>
+                <span class="ccr-ead">$${cp.ead_mm.toFixed(1)}MM</span>
+                <div class="ccr-bar"><div class="ccr-fill ${colorCls}" style="width:${Math.min(pct,100)}%;"></div></div>
+                <span class="ccr-pct ${pctCls}">${pct.toFixed(1)}%</span>
+                <span class="ccr-rating">${cp.rating}</span>
+            </div>`;
+        }).join('');
+    }
+
+    // --- P&L ---
+
+    async function fetchPnL() {
+        try {
+            const res = await fetch('/api/pnl');
+            const data = await res.json();
+            renderPnL(data);
+        } catch (_) { /* silently skip */ }
+    }
+
+    function renderPnL(data) {
+        const el = document.getElementById('pnl-container');
+        const books = data.by_book || [];
+
+        el.innerHTML = `
+            <table>
+                <thead>
+                    <tr>
+                        <th>Book</th>
+                        <th style="text-align:right;">Daily P&amp;L</th>
+                        <th style="text-align:right;">YTD P&amp;L</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${books.map(b => `<tr>
+                        <td>${b.book}</td>
+                        <td style="text-align:right;" class="${pnlClass(b.daily_pnl)}">${b.daily_pnl >= 0 ? '+' : ''}$${fmtNum(b.daily_pnl)}</td>
+                        <td style="text-align:right;" class="${pnlClass(b.ytd_pnl)}">${b.ytd_pnl >= 0 ? '+' : ''}$${fmtNum(b.ytd_pnl)}</td>
+                    </tr>`).join('')}
+                    <tr class="pnl-total">
+                        <td>TOTAL</td>
+                        <td style="text-align:right;" class="${pnlClass(data.daily_total)}">${data.daily_total >= 0 ? '+' : ''}$${fmtNum(data.daily_total)}</td>
+                        <td style="text-align:right;" class="${pnlClass(data.ytd_total)}">${data.ytd_total >= 0 ? '+' : ''}$${fmtNum(data.ytd_total)}</td>
+                    </tr>
+                </tbody>
+            </table>`;
+    }
+
+    // --- Initial load + refresh every 5 seconds ---
+    fetchGreeks();
+    fetchCCR();
+    fetchPnL();
+    setInterval(fetchGreeks, 5000);
+    setInterval(fetchCCR,    5000);
+    setInterval(fetchPnL,    5000);
 </script>
 </body>
 </html>
