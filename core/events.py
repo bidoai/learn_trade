@@ -168,6 +168,22 @@ class RiskAlertEvent:
 
 
 # ---------------------------------------------------------------------------
+# Options Events
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class GreeksEvent:
+    """Published when Greeks are computed for an options position."""
+    symbol: str
+    delta: float
+    gamma: float
+    vega: float
+    theta: float
+    rho: float
+    timestamp: datetime = field(default_factory=datetime.utcnow)
+
+
+# ---------------------------------------------------------------------------
 # System Events
 # ---------------------------------------------------------------------------
 

@@ -4,9 +4,11 @@ A complete buy-side trading system built for understanding how a quantitative he
 operates end-to-end. Covers market data ingestion, signal generation, portfolio construction,
 order management, risk management, execution, and performance reporting.
 
-**Audience:** This README assumes a background in mathematical finance and sell-side risk
-(CCR, XVA). It draws explicit parallels between sell-side and buy-side concepts, explains
-the financial intuition behind each component, and covers the math where it matters.
+**Audience:** Anyone with quantitative training who wants to understand how algorithmic
+trading systems actually work — from market microstructure to stochastic calculus to the
+organizational dynamics of a real fund. No finance background required; math background
+helpful. The stochastic calculus section (§14) is written to be accessible to anyone who
+has taken a graduate probability course.
 
 ---
 
@@ -45,7 +47,7 @@ and the failure modes that cause most strategies to break in production.
 11. [Strategy Capacity](#11-strategy-capacity)
 12. [Observability and Monitoring](#12-observability-and-monitoring)
 13. [Alpha Monitoring in Production](#13-alpha-monitoring-in-production)
-14. [The Math](#14-the-math)
+14. [The Math — Stochastic Calculus Primer](#14-the-math)
 15. [What Real Hedge Funds Look Like](#15-what-real-hedge-funds-look-like)
 16. [Running the System](#16-running-the-system)
 17. [Next Steps](#17-next-steps)
@@ -208,8 +210,9 @@ In production, HFTs use tick data (every individual trade). For learning:
 The `AlpacaWSFeed` monitors for gaps. If a symbol goes quiet for `stale_data_timeout_sec`
 (default 60s), a `StaleDataEvent` is published and signal generation halts for that symbol.
 
-**CCR analogy:** This is like market data unavailability in an exposure model. When
-you can't observe the market, you conservatively halt rather than extrapolate stale prices.
+**Design principle:** when you can't observe the market, halt rather than extrapolate
+stale prices. A signal generated from 5-minute-old data in a fast market can be worse
+than no signal — it creates a one-sided risk without the corresponding information.
 
 ---
 
@@ -234,9 +237,10 @@ where:
 A pure alpha strategy has β = 0 (market neutral). In practice, most hedge funds have
 some small residual beta. The goal is to maximize α while controlling β.
 
-**CCR analogy:** Alpha is like a positive CVA adjustment — it's the extra value your
-model generates over the market price. Just as CVA can become negative (you're being
-paid less than the risk warrants), alpha can decay to zero.
+**Key distinction:** alpha is return above what your *risk exposure* would predict.
+A strategy that returns 15% in a year when the market returns 20% has not generated
+alpha — it has underperformed on a risk-adjusted basis. Alpha is the residual after
+accounting for all known risk factors.
 
 ### Strategy 1: Momentum
 
@@ -1081,110 +1085,464 @@ Overfitting (was never real):
 
 ## 14. The Math
 
-### Returns Arithmetic
+This section builds from first principles. Each piece of math is linked to a concrete
+component in this codebase. Skip ahead if you know the material; come back if you hit
+something in the code that feels unmotivated.
 
-Daily log return vs. simple return:
+---
+
+### 14.1 Why Stochastic Calculus?
+
+Ordinary differential equations describe deterministic systems. A stock price is not
+deterministic — it has a random component at every moment. We need a calculus that can
+handle both drift (predictable trend) and diffusion (random noise) simultaneously.
+
+The solution, developed by Itô in the 1940s, is to model price processes as integrals
+of random noise. This gives us a rigorous way to write equations like *dS = μS dt + σS dW*
+and deduce consequences from them.
+
+---
+
+### 14.2 Brownian Motion (the Wiener Process)
+
+**Brownian motion** W_t is the canonical model of pure randomness in continuous time.
+It is the unique process satisfying all four of:
+
+```
+1. W_0 = 0                              (starts at zero)
+2. W_t - W_s ~ N(0, t-s)  for t > s    (increments are Gaussian, variance = time elapsed)
+3. Non-overlapping increments are independent
+4. Sample paths t ↦ W_t are continuous (no jumps)
+```
+
+The key insight: **variance grows linearly with time**. Over one day, a price moves by
+~σ√(1/252) in annualized terms. Over four days, by ~σ√(4/252) = 2σ√(1/252). Risk
+scales with the *square root* of time. This is why VaR for a 10-day horizon is
+√10 × 1-day VaR under the normal model.
+
+In the code, every bar of market data represents one discrete step in what we model as a
+continuous Brownian path (`data/historical.py`).
+
+---
+
+### 14.3 Geometric Brownian Motion (GBM)
+
+The simplest reasonable model of a stock price S_t:
+
+```
+dS = μS dt + σS dW
+
+where:
+  μ  = drift (expected annual return, e.g. 0.10 = 10%)
+  σ  = volatility (annual standard deviation, e.g. 0.20 = 20%)
+  dW = Brownian increment (a "shock" of size ~√dt)
+```
+
+The *μS dt* term is deterministic drift — the stock tends to go up. The *σS dW* term is
+random noise, proportional to the current price (so a $200 stock has twice the dollar
+noise of a $100 stock at the same σ).
+
+**Why multiply by S?** Because percentage moves are what matter in finance, not dollar
+moves. An $5 move in AAPL is very different from a $5 move in a $7 penny stock.
+
+**The solution:** applying Itô's lemma (§14.4) to f(S) = ln(S):
+
+```
+S_t = S_0 · exp((μ - σ²/2)·t + σ·W_t)
+```
+
+The *-σ²/2* term is the Itô correction — see §14.4. Prices follow a log-normal
+distribution: *ln(S_t)* is normally distributed.
+
+**Warning — what GBM gets wrong:** GBM assumes constant volatility. Real markets have:
+- **Volatility clustering:** large moves beget large moves (GARCH effects)
+- **Fat tails:** extreme events occur far more often than GBM predicts
+- **Volatility smile:** implied volatility varies by option strike, which GBM cannot explain
+
+GBM is a starting point, not ground truth. More sophisticated models (Heston stochastic
+volatility, SABR, Variance Gamma) correct these flaws at the cost of more parameters.
+
+---
+
+### 14.4 Itô's Lemma — The Chain Rule of Stochastic Calculus
+
+In ordinary calculus, if *f* is smooth and *x* changes by *dx*, then:
+```
+df = f'(x) dx
+```
+
+In Itô calculus, if *S* follows a stochastic process and *f(S, t)* is smooth:
+```
+df = ∂f/∂t · dt  +  ∂f/∂S · dS  +  ½ · ∂²f/∂S² · (dS)²
+```
+
+The third term is new. In ordinary calculus, *(dx)²* is negligible (second-order small).
+For Brownian motion, it is not — because **(dW)² = dt** exactly (not approximately).
+This is the central fact of stochastic calculus:
+
+```
+(dW)² = dt       ← quadratic variation of Brownian motion is deterministic
+(dW)(dt) = 0
+(dt)²    = 0
+```
+
+**Derivation of the Itô correction:** Apply Itô's lemma to *f(S) = ln(S)*:
+```
+dS = μS dt + σS dW                         (GBM)
+
+d(ln S) = (1/S) dS + ½(-1/S²)(dS)²        (Itô's lemma)
+        = (1/S)(μS dt + σS dW) + ½(-1/S²)(σ²S² dt)
+        = μ dt + σ dW - σ²/2 dt
+        = (μ - σ²/2) dt + σ dW
+```
+
+Integrate both sides from 0 to t:
+```
+ln(S_t/S_0) = (μ - σ²/2)t + σW_t
+S_t = S_0 exp((μ - σ²/2)t + σW_t)
+```
+
+**The -σ²/2 is not a typo.** It is the Itô correction. It says: the *expected log return*
+is *μ - σ²/2*, not *μ*. The difference is Jensen's inequality: E[exp(X)] > exp(E[X]) for
+random X, so the arithmetic mean return is higher than the geometric mean return. The gap
+between them is σ²/2.
+
+**Practical consequence:** if a strategy has σ = 30% annual volatility and μ = 15%,
+its expected log-return is only 15% - 4.5% = **10.5%** annually. At high volatility,
+the Itô correction becomes significant. This is why volatility destroys compound returns.
+
+---
+
+### 14.5 The Ornstein-Uhlenbeck Process (Mean Reversion)
+
+The mean reversion strategy in this codebase (`strategy/mean_reversion.py`) is implicitly
+modeled by the Ornstein-Uhlenbeck (OU) process:
+
+```
+dX = θ(μ - X) dt + σ dW
+
+where:
+  θ  = speed of mean reversion (higher → faster pull to mean)
+  μ  = long-run equilibrium (the mean we revert to)
+  σ  = noise amplitude
+```
+
+When X > μ, the drift term *θ(μ - X) dt* is negative — X is pulled down. When X < μ,
+it's pulled up. This creates a rubber-band effect around the equilibrium level.
+
+**The exact solution:**
+```
+X_t = μ + (X_0 - μ)e^{-θt} + σ∫₀ᵗ e^{-θ(t-s)} dW_s
+```
+
+The stationary (long-run) distribution is:
+```
+X_∞ ~ N(μ, σ²/2θ)
+```
+
+So the stationary standard deviation is *σ/√(2θ)*. Faster mean reversion (larger θ) →
+tighter distribution around μ → smaller z-scores for the same price deviation.
+
+**Why the z-score is the right signal:** the mean reversion strategy computes
+*(X - μ) / σ_rolling*, which is an estimate of how many stationary standard deviations
+the price has deviated. Under the OU model, this has a known stationary distribution
+(standard normal), making the z-score threshold meaningful.
+
+**OU process also models:**
+- Interest rates (Vasicek model uses the same SDE)
+- Credit spreads in structural models
+- Pairs trading spreads (the spread between two cointegrated stocks)
+
+---
+
+### 14.6 The Black-Scholes PDE and Options Pricing
+
+The Black-Scholes model (1973) — one of the most important results in quantitative finance
+— prices European options using a no-arbitrage argument.
+
+**Setup:** an option with payoff *Φ(S_T)* at expiry *T*. We want the fair price *V(S, t)*.
+
+**The delta-hedging argument:** at every moment, form a portfolio:
+```
+Π = V - Δ·S    (long option, short Δ shares of the underlying)
+```
+
+Choose Δ = ∂V/∂S (the "delta"). By Itô's lemma:
+```
+dV = ∂V/∂t dt + ∂V/∂S dS + ½ ∂²V/∂S² (dS)²
+```
+
+The portfolio change:
+```
+dΠ = dV - Δ·dS
+   = (∂V/∂t + ½σ²S²∂²V/∂S²) dt    ← the random dW terms cancel!
+```
+
+The randomness is gone. A riskless portfolio must earn the risk-free rate *r*:
+```
+dΠ = r·Π·dt = r(V - ΔS) dt
+```
+
+Setting equal and substituting Δ = ∂V/∂S gives the **Black-Scholes PDE**:
+
+```
+∂V/∂t  +  ½σ²S² ∂²V/∂S²  +  rS ∂V/∂S  -  rV  =  0
+```
+
+**The solution** for a European call (payoff = max(S_T - K, 0)):
+```
+C(S, K, r, T, σ) = S·N(d₁) - K·e^{-rT}·N(d₂)
+
+where:
+  d₁ = [ln(S/K) + (r + σ²/2)T] / (σ√T)
+  d₂ = d₁ - σ√T
+  N  = standard normal CDF
+
+European put (via put-call parity: P = C - S + Ke^{-rT}):
+  P(S, K, r, T, σ) = K·e^{-rT}·N(-d₂) - S·N(-d₁)
+```
+
+**Intuition:** *S·N(d₁)* is the expected value of the stock conditional on the option
+expiring in-the-money. *K·e^{-rT}·N(d₂)* is the present value of paying the strike,
+also conditional on expiration in-the-money. The call price is the difference.
+
+Implemented in `pricing/black_scholes.py`.
+
+---
+
+### 14.7 The Greeks — Sensitivities of an Option Price
+
+Each Greek measures how the option price changes with one input, holding all others fixed.
+
+```
+Delta (Δ) = ∂V/∂S
+  Call delta: N(d₁)              ∈ (0, 1)
+  Put delta:  N(d₁) - 1         ∈ (-1, 0)
+  Interpretation: Δ = 0.5 means the option gains $0.50 per $1 move in the stock.
+  Used for: hedging → hold -Δ shares per option to be price-neutral.
+
+Gamma (Γ) = ∂²V/∂S² = ∂Δ/∂S
+  Both call and put: N'(d₁) / (Sσ√T)   > 0 always
+  Interpretation: rate of change of delta. High gamma means your hedge needs
+  frequent rebalancing. Gamma is highest near the strike close to expiry.
+  Long options: long gamma (you profit from large moves).
+  Short options: short gamma (you lose from large moves).
+
+Vega (ν) = ∂V/∂σ
+  Both call and put: S·N'(d₁)·√T        > 0 always
+  Interpretation: option price sensitivity to volatility. Vega of 5 means the
+  option gains $5 if implied vol rises by 1 percentage point (100 bps).
+  Long options: long vega (benefit from rising vol).
+
+Theta (Θ) = ∂V/∂t
+  Call: [-S·N'(d₁)·σ/(2√T) - r·K·e^{-rT}·N(d₂)] / 252   < 0 typically
+  Put:  [-S·N'(d₁)·σ/(2√T) + r·K·e^{-rT}·N(-d₂)] / 252
+  Interpretation: time decay (daily). A theta of -0.05 means the option loses
+  $0.05 of value per day, holding all else equal.
+  Long options: negative theta — you pay for optionality with daily decay.
+
+Rho (ρ) = ∂V/∂r
+  Call: K·T·e^{-rT}·N(d₂) / 100    > 0
+  Put:  -K·T·e^{-rT}·N(-d₂) / 100  < 0
+  Interpretation: sensitivity to risk-free rate. Less important than the other
+  Greeks for short-dated options.
+```
+
+**The fundamental gamma-theta trade-off:**
+```
+θ + ½σ²S²Γ = rV    (from the Black-Scholes PDE)
+```
+
+A long option position has positive Γ (benefits from large moves) and negative Θ (pays
+daily decay). These must balance at the risk-free rate. Gamma scalping — buying options
+and delta-hedging to harvest the gamma — is profitable only if realized volatility exceeds
+the implied volatility you paid for.
+
+---
+
+### 14.8 The Risk-Neutral Measure — Why You Price at r, Not μ
+
+A common confusion: Black-Scholes uses the risk-free rate *r* as the stock's drift, not
+the actual expected return *μ*. Why?
+
+Under the **physical measure P**, the stock has drift *μ* (the real-world expected return).
+Under the **risk-neutral measure Q**, we define a new probability measure where the stock
+has drift *r*. The change of measure is given by **Girsanov's theorem**:
+
+```
+dW^Q = dW^P + λ dt     where λ = (μ - r)/σ  (the market price of risk)
+```
+
+Under Q, every traded asset grows at the risk-free rate. The price of any derivative is:
+```
+V(S, t) = e^{-r(T-t)} · E^Q[Φ(S_T) | S_t = S]
+```
+
+**Why this works:** in a complete market, any option payoff can be replicated by
+continuously trading the stock and a bond. The cost of the replicating portfolio is
+the option price — and that cost is the same regardless of whether you're a bull or
+a bear (regardless of *μ*). Option pricing is about replication cost, not probability.
+
+The practical consequence: when you price options, your view on where AAPL will go
+in 6 months is irrelevant. What matters is implied volatility — the market's consensus
+on σ, embedded in the price.
+
+---
+
+### 14.9 Implied Volatility and the Volatility Smile
+
+Black-Scholes is invertible: given a market option price, you can solve for the σ that
+makes the formula match. This is **implied volatility (IV)** — the market's forward-looking
+estimate of realized volatility.
+
+The model predicts IV should be the same across all strikes and expiries. It is not.
+In practice:
+
+```
+Volatility Smile (equity options, typical):
+
+  IV
+  │     ●                    ●
+  │       ●                ●
+  │         ●            ●
+  │           ●        ●
+  │              ●  ●
+  │
+  └─────────────────────────────── Strike K
+      OTM puts  ATM   OTM calls
+
+Put IV > ATM IV: the market prices left-tail risk more expensively than GBM predicts.
+This reflects the empirical fact that equity crashes are more common and more severe
+than a log-normal distribution implies.
+```
+
+The smile is direct evidence that GBM is wrong. It has spawned an entire industry of
+alternatives: Heston model (stochastic vol), SABR (popular for rates), local volatility
+(Dupire), jump-diffusion models (Merton), and rough volatility models.
+
+---
+
+### 14.10 Returns and Volatility Arithmetic
+
+**Log return vs. simple return:**
 ```
 Simple: r_t = (P_t - P_{t-1}) / P_{t-1}
 Log:    r_t = ln(P_t / P_{t-1})
 
 For small moves, log ≈ simple.
-Log returns are additive: r_{1→T} = Σ r_t
-Simple returns are compoundable: (1+r_{1→T}) = Π (1+r_t)
+Log returns are additive: r_{1→T} = Σ r_t   (easy for statistics)
+Simple returns are compoundable: (1+R_{1→T}) = Π(1+r_t)  (correct for P&L)
 ```
 
-Use log returns for statistics; use simple returns for P&L.
+Use log returns for statistics (volatility, Sharpe); use simple returns for P&L.
 
-### Realized Volatility
-
+**Realized volatility:**
 ```
-σ_realized = std(r_t, ..., r_{t-N}) × √252    (annualized)
+σ_realized = std(r_t, ..., r_{t-N}) × √252    (annualized from daily)
 
-Rolling 20-day realized vol is the most common risk measure.
-EWMA (λ=0.94) gives more weight to recent returns — used in RiskMetrics:
+Rolling 20-day realized vol is the most common risk input.
+EWMA (λ=0.94) gives more weight to recent returns — the RiskMetrics model:
 
 σ²_t = λ × σ²_{t-1} + (1-λ) × r²_{t-1}
 ```
 
-### Z-Score (Mean Reversion Signal)
-
+**Z-score (mean reversion signal):**
 ```python
 import numpy as np
 closes = np.array([bar.close for bar in self.bars])
 z = (closes[-1] - closes.mean()) / closes.std()
 ```
 
-The z-score tells you how many standard deviations the current price is from its
-rolling mean. Under the null hypothesis of i.i.d. normal returns, |z| > 2 occurs
-about 5% of the time — making it a statistically meaningful signal threshold.
+Under the OU model (§14.5), this z-score has a known stationary distribution ≈ N(0, 1),
+making |z| > 2 a statistically meaningful threshold. In practice: equity prices are NOT
+i.i.d. normal (fat tails, autocorrelation, vol clustering), so treat the threshold as a
+calibrated heuristic, not a probabilistic statement.
 
-**Note:** Equity prices are NOT i.i.d. normal (they have fat tails, autocorrelation,
-and volatility clustering). The z-score is still useful as a relative measure, but
-its statistical interpretation requires care.
-
-### Momentum Return
-
+**Momentum signal:**
 ```python
 n_bar_return = (closes[-1] - closes[0]) / closes[0]
 ```
 
-The classic Jegadeesh-Titman signal uses 12-month returns skipping the most recent
-month (to avoid short-term reversal contaminating the signal). For daily bars:
+The classic Jegadeesh-Titman (1993) signal uses 12-month returns, skipping the most
+recent month to avoid short-term reversal contamination. For daily bars:
 ```
 momentum = return over bars [t-252 : t-21]  (skip last month)
 ```
 
-### VaR (Historical Simulation)
+---
 
+### 14.11 Risk Measures
+
+**VaR (historical simulation):**
 ```python
 import numpy as np
 returns = np.diff(equity_curve) / equity_curve[:-1]
 var_95 = -np.percentile(returns, 5)   # loss at 5th percentile
 ```
 
-**Parametric VaR** (assumes normal returns):
+**Parametric VaR (assumes normal returns):**
 ```
-VaR_{95%} = μ - 1.645 × σ    (1-tailed 95%)
-VaR_{99%} = μ - 2.326 × σ    (1-tailed 99%)
+VaR_{95%} = μ - 1.645 × σ    (one-tailed 95%)
+VaR_{99%} = μ - 2.326 × σ    (one-tailed 99%)
 ```
 
-**CVaR (Expected Shortfall):**
+**CVaR / Expected Shortfall** (the mean loss beyond VaR):
 ```
 CVaR_{95%} = -E[R | R < -VaR_{95%}]
-           = -(1/0.05) × ∫_{-∞}^{-VaR} r f(r) dr
+           = -(1/0.05) × ∫_{-∞}^{-VaR} r·f(r) dr
 ```
 
-### Sharpe Ratio
+CVaR is preferred by regulators (Basel III FRTB uses ES, not VaR) because VaR ignores
+the shape of the tail beyond the threshold.
 
+---
+
+### 14.12 Performance Metrics
+
+**Sharpe Ratio:**
 ```python
 daily_returns = np.diff(equity) / equity[:-1]
 sharpe = (daily_returns.mean() / daily_returns.std()) * np.sqrt(252)
 ```
 
-### Maximum Drawdown
+Benchmarks (net of fees, over a full market cycle):
+- Sharpe < 0.5: poor
+- 0.5–1.0: acceptable
+- 1.0–2.0: institutional quality
+- > 2.0: excellent (top-tier quant funds)
+- > 3.0: examine carefully — possible look-ahead bias or favorable short-term regime
 
+Note: a strategy can post Sharpe > 3 over a favorable 12-month window legitimately.
+The warning applies to full-cycle (5+ year) Sharpes; those are almost never real
+without some form of data contamination.
+
+**Maximum Drawdown:**
 ```python
 peak = np.maximum.accumulate(equity)
 drawdown = (peak - equity) / peak
 max_drawdown = drawdown.max()   # expressed as fraction of peak
 ```
 
-### Kelly Criterion
+A -40% drawdown requires +67% to recover. The nonlinearity of compounding means
+drawdown control is not symmetric with return generation.
 
-For a binary outcome (win probability p, win amount b, lose amount 1):
-```
-f* = p - q/b = p - (1-p)/b
+**Kelly Criterion (optimal position sizing):**
 
-Fractional Kelly (recommended): f = f*/k, where k=2 (half-Kelly) or k=4 (quarter-Kelly)
+For a binary outcome (win probability p, win/loss ratio b):
 ```
-
-For a continuous distribution of returns:
-```
-f* = μ / σ²    (approximately, for small positions)
+f* = p - (1-p)/b
 ```
 
-This is the theoretical optimum — it maximizes long-run wealth growth but
-implies extreme volatility. Most funds use 20-25% of Kelly.
+For a continuous return distribution (approximately, for small positions):
+```
+f* = μ / σ²
+```
+
+This maximizes long-run log-wealth growth, but the bet size it recommends is
+dangerously large in practice. The standard approach is **half-Kelly** (f*/2),
+which trades off ~25% of expected long-run growth in exchange for dramatically
+reduced drawdown. Quarter-Kelly (f*/4) is also common. Full Kelly implies
+volatility so high that most investors would capitulate during the drawdowns.
 
 ---
 
@@ -1378,22 +1736,19 @@ trading_system/
 ## 17. Next Steps
 
 ### Immediate (to complete the system)
-1. **`ml/` module** — `FeatureBuilder` with cutoff assertion, `TimeSeriesSplit`, `MLStrategy`
-2. **Position persistence** — load/save positions on restart via event replay
-3. **Wire audit log** — `EventStore` subscribes to all event types in `run_live.py`
-4. **Performance tracker** — realized P&L, Sharpe calculation, equity curve persistence
+1. **Position persistence** — load/save positions on restart via event replay
+2. **Wire audit log** — `EventStore` subscribes to all event types in `run_live.py`
+3. **Performance tracker** — realized P&L, Sharpe calculation, equity curve persistence
 
-### Phase 2 (deepen understanding)
-5. **FIX protocol** — replace Alpaca REST with FIX sessions (industry standard)
-6. **Transaction cost model** — add slippage and commission to backtest
-7. **Factor exposure** — compute Fama-French factor loadings for the portfolio
-8. **Walk-forward analysis** — automate the research → backtest → validate loop
+### Shipped (Phase 2)
+- **ML strategy** — `GradientBoostingClassifier` with look-ahead bias enforcement via `cutoff_date` assertion, `TimeSeriesSplit` for training
+- **FIX protocol** — `FIXExecutor` implementing FIX 4.2 over TCP with `FIXSimulator` for testing
+- **Walk-forward optimizer** — Bayesian hyperparameter search (Optuna) with IS vs OOS Sharpe overfitting detection
 
-### Phase 3 (advanced topics)
-9. **Options strategies** — Black-Scholes, Greeks, delta hedging (your MFin background applies directly)
-10. **Statistical arbitrage** — pairs trading via cointegration (Engle-Granger)
-11. **Alternative data** — NLP on earnings calls, satellite data pipeline
-12. **Portfolio optimization** — Markowitz, risk parity, Black-Litterman
+### Phase 3 (in progress)
+- **Options/Greeks** — Black-Scholes pricing, all five Greeks, delta hedging strategy (`pricing/black_scholes.py`, `strategy/delta_hedge.py`)
+- **Statistical arbitrage** — pairs trading via cointegration (Engle-Granger)
+- **Portfolio optimization** — Markowitz, risk parity, Black-Litterman
 
 ### Suggested Reading
 

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from enum import Enum, auto
 from typing import Optional
 
@@ -150,3 +150,27 @@ class Fill:
     strategy_id: str
     timestamp: datetime = field(default_factory=datetime.utcnow)
     broker_fill_id: Optional[str] = None
+
+
+class OptionType(Enum):
+    CALL = "call"
+    PUT = "put"
+
+
+@dataclass
+class OptionContract:
+    """Defines an option position."""
+    symbol: str          # underlying symbol (e.g. "AAPL")
+    option_type: OptionType
+    strike: float        # strike price K
+    expiry: date         # expiration date
+    contracts: int       # number of contracts (1 contract = 100 shares)
+    entry_price: float   # premium paid/received per share
+
+    @property
+    def multiplier(self) -> int:
+        return 100
+
+    @property
+    def notional(self) -> float:
+        return self.entry_price * self.contracts * self.multiplier
