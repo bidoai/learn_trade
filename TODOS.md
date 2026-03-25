@@ -24,6 +24,27 @@ walk-forward expanding-window validation, IS vs OOS Sharpe overfitting detection
 
 ---
 
+## System Fixes — ✓ DONE (2026-03-24)
+
+### ~~Audit subscriber wiring~~ ✓ DONE
+**Shipped:** `audit/subscriber.py` — `AuditSubscriber` subscribes to FillEvent, SignalEvent,
+OrderApprovedEvent, OrderBlockedEvent, OrderStatusEvent, RiskAlertEvent, SystemEvent and
+persists each to SQLite via EventStore. Wired in `run_live.py` as a background task.
+
+### ~~Position persistence~~ ✓ DONE
+**Shipped:** EventStore now has a `positions` table with `save_snapshot()` / `load_snapshot()`.
+Positions are saved after every fill and restored on startup — state survives restarts.
+
+### ~~Risk engine price lookup fix~~ ✓ DONE
+**Shipped:** RiskEngine now accepts `last_prices: dict` and checks it first in `_get_last_price()`.
+Real market prices (from the live data feed) are used for position sizing. Falls back to
+avg_entry_price if no live price is available, then to $1.0. Fixes the bug where a 1000-share
+order of a $200 stock would pass size checks as if the stock cost $1.
+
+16 new tests in `tests/test_audit_and_persistence.py`. All 117 tests passing.
+
+---
+
 ## P3 — High Value, Phase 3
 
 ### Options / Greeks Support

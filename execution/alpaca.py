@@ -44,6 +44,7 @@ class AlpacaExecutor(ExecutionEngine):
         self._trading_client = None
         self._stream_client = None
         self._connected = False
+        self._stream_task: Optional[asyncio.Task] = None
 
     async def connect(self) -> None:
         """
@@ -74,7 +75,7 @@ class AlpacaExecutor(ExecutionEngine):
                 paper=True,
             )
             self._stream_client.subscribe_trade_updates(self._on_trade_update)
-            asyncio.create_task(self._run_stream())
+            self._stream_task = asyncio.create_task(self._run_stream())
 
             self._connected = True
             await self.bus.publish(SystemEvent(event_type="feed_connected", message="Alpaca executor connected"))
@@ -143,6 +144,8 @@ class AlpacaExecutor(ExecutionEngine):
 
     async def disconnect(self) -> None:
         self._connected = False
+        if self._stream_task:
+            self._stream_task.cancel()
         if self._stream_client:
             await self._stream_client.stop_ws()
         logger.info("alpaca.disconnected")

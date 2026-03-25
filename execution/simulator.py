@@ -10,7 +10,7 @@ the backtest wiring requires no mode flags in OMS or strategies.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 import structlog
@@ -68,7 +68,7 @@ class SimulatedExecutor(ExecutionEngine):
                 fill_price=price,
                 fill_quantity=order.quantity,
                 strategy_id=order.strategy_id,
-                timestamp=datetime.utcnow(),
+                timestamp=datetime.now(timezone.utc),
             )
             await self.bus.publish(FillEvent(fill=fill))
             logger.debug(

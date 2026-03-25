@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from enum import Enum, auto
 from typing import Optional
 
@@ -90,8 +90,8 @@ class Order:
     limit_price: Optional[float] = None
     filled_quantity: int = 0
     avg_fill_price: Optional[float] = None
-    created_at: datetime = field(default_factory=datetime.utcnow)
-    updated_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     broker_order_id: Optional[str] = None  # Alpaca's order ID
 
     # Idempotency key: strategy_id + symbol + side + timestamp bucket (1-min)
@@ -124,15 +124,14 @@ class Position:
     quantity: int          # positive = long, negative = short
     avg_entry_price: float
     strategy_id: str
-    opened_at: datetime = field(default_factory=datetime.utcnow)
-    updated_at: datetime = field(default_factory=datetime.utcnow)
+    opened_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     @property
     def is_flat(self) -> bool:
         return self.quantity == 0
 
-    @property
-    def market_value(self, current_price: float = 0.0) -> float:
+    def market_value(self, current_price: float) -> float:
         return self.quantity * current_price
 
     def unrealized_pnl(self, current_price: float) -> float:
@@ -148,7 +147,7 @@ class Fill:
     fill_price: float
     fill_quantity: int
     strategy_id: str
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     broker_fill_id: Optional[str] = None
 
 

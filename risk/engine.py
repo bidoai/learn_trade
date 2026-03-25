@@ -48,10 +48,14 @@ class RiskEngine:
         positions: "PositionTracker",
         settings: RiskSettings,
         initial_capital: float,
+        last_prices: Optional[dict] = None,
     ) -> None:
         self.positions = positions
         self.settings = settings
         self.initial_capital = initial_capital
+        # Reference to the live price dict populated by the data feed.
+        # Passed as a reference so updates are reflected without re-injecting.
+        self._last_prices: dict = last_prices if last_prices is not None else {}
 
         self.circuit_breaker = CircuitBreaker(
             max_daily_loss_pct=settings.max_daily_loss_pct,
@@ -167,11 +171,22 @@ class RiskEngine:
     # ------------------------------------------------------------------
 
     def _get_last_price(self, symbol: str) -> float:
-        """Get last known price for position sizing. Fallback to 0."""
+        """
+        Get last known price for position sizing.
+
+        Priority:
+          1. Live market price from last_prices dict (updated on every bar)
+          2. Average entry price of an existing position (stale but better than nothing)
+          3. $1.0 fallback — used only before the first bar arrives. Returns a
+             conservative low value so size checks are generous (not dangerous)
+             until a real price is known.
+        """
+        if symbol in self._last_prices and self._last_prices[symbol] > 0:
+            return self._last_prices[symbol]
         pos = self.positions.get(symbol)
         if pos and pos.avg_entry_price > 0:
             return pos.avg_entry_price
-        return 1.0  # conservative: treat as $1 if unknown (will pass size check)
+        return 1.0
 
     def _symbol_exposure(self, symbol: str) -> float:
         """Total dollar exposure in a symbol across all strategies."""

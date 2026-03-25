@@ -36,6 +36,7 @@ from api.websocket import DashboardBroadcaster
 from audit.event_store import EventStore
 from config.settings import Settings
 from core.event_bus import EventBus
+from audit.subscriber import AuditSubscriber
 from core.events import FillEvent, MarketDataEvent, SignalEvent
 from data.alpaca_feed import AlpacaWSFeed
 from execution.alpaca import AlpacaExecutor
@@ -73,8 +74,12 @@ async def startup() -> None:
     # Step 2: State — restore positions from last session
     # ----------------------------------------------------------------
     positions = PositionTracker()
-    # TODO: load persisted positions from event_store on restart
-    logger.info("startup.positions_ready")
+    saved = event_store.load_snapshot()
+    if saved:
+        positions.load_from_snapshot(saved)
+        logger.info("startup.positions_restored", count=len(saved))
+    else:
+        logger.info("startup.positions_ready")
 
     # ----------------------------------------------------------------
     # Step 3: Risk engine
@@ -83,6 +88,7 @@ async def startup() -> None:
         positions=positions,
         settings=settings.risk,
         initial_capital=settings.strategy.initial_capital,
+        last_prices=last_prices,
     )
     risk.assert_healthy()  # Raises if config is invalid
 
@@ -120,6 +126,14 @@ async def startup() -> None:
             signal = strategy.on_market_data(event)
             if signal:
                 await bus.publish(signal)
+
+    # Persist positions after every fill so state survives restarts
+    fill_persist_queue = bus.subscribe(FillEvent)
+
+    async def persist_positions_on_fill() -> None:
+        while True:
+            await fill_persist_queue.get()
+            event_store.save_snapshot(positions.snapshot())
 
     # ----------------------------------------------------------------
     # Step 7: Portfolio allocator
@@ -161,6 +175,11 @@ async def startup() -> None:
     )
 
     # ----------------------------------------------------------------
+    # Step 1b: Audit subscriber (wired after bus is ready)
+    # ----------------------------------------------------------------
+    audit_subscriber = AuditSubscriber(event_store, bus)
+
+    # ----------------------------------------------------------------
     # Start all background tasks
     # ----------------------------------------------------------------
     tasks = [
@@ -168,6 +187,8 @@ async def startup() -> None:
         asyncio.create_task(oms.run_fill_processing()),
         asyncio.create_task(allocator.run()),
         asyncio.create_task(broadcaster.run()),
+        asyncio.create_task(audit_subscriber.run()),
+        asyncio.create_task(persist_positions_on_fill()),
         *[asyncio.create_task(run_strategy(s.strategy_id)) for s in strategies],
     ]
 
@@ -185,12 +206,19 @@ async def startup() -> None:
 
     try:
         await asyncio.gather(server.serve(), *tasks)
-    except asyncio.CancelledError:
+    except (asyncio.CancelledError, KeyboardInterrupt):
         pass
     finally:
         logger.info("shutdown.started")
+        # Cancel all background tasks so they don't outlive the finally block
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        server.should_exit = True
         await execution.disconnect()
         await feed.disconnect()
+        event_store.save_snapshot(positions.snapshot())
         event_store.close()
         logger.info("shutdown.complete")
 
