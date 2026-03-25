@@ -9,7 +9,7 @@ are loaded from SQLite to restore state across restarts.
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 import structlog
@@ -78,7 +78,7 @@ class PositionTracker:
                 pos.quantity = new_quantity
                 pos.avg_entry_price = fill.fill_price
 
-            pos.updated_at = datetime.utcnow()
+            pos.updated_at = datetime.now(timezone.utc)
 
         logger.info(
             "position.updated",

@@ -41,6 +41,7 @@ class AlpacaWSFeed:
         self._stream = None
         self._last_bar_time: dict[str, datetime] = {}
         self._stale_monitor_task: Optional[asyncio.Task] = None
+        self._stream_task: Optional[asyncio.Task] = None
 
     async def connect(self) -> None:
         """
@@ -58,7 +59,7 @@ class AlpacaWSFeed:
             self._stream.subscribe_bars(self._on_bar, *self.settings.symbols)
 
             self._stale_monitor_task = asyncio.create_task(self._monitor_stale_data())
-            asyncio.create_task(self._run_stream())
+            self._stream_task = asyncio.create_task(self._run_stream())
 
             logger.info(
                 "alpaca_feed.connected",
@@ -77,6 +78,8 @@ class AlpacaWSFeed:
     async def disconnect(self) -> None:
         if self._stale_monitor_task:
             self._stale_monitor_task.cancel()
+        if self._stream_task:
+            self._stream_task.cancel()
         if self._stream:
             await self._stream.stop_ws()
         logger.info("alpaca_feed.disconnected")
@@ -109,7 +112,7 @@ class AlpacaWSFeed:
                 )
                 return
 
-            self._last_bar_time[b.symbol] = datetime.utcnow()
+            self._last_bar_time[b.symbol] = datetime.now(timezone.utc)
             await self.bus.publish(MarketDataEvent(bar=b))
 
         except Exception:
@@ -124,7 +127,7 @@ class AlpacaWSFeed:
         """
         while True:
             await asyncio.sleep(10)
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             for symbol in self.settings.symbols:
                 last = self._last_bar_time.get(symbol)
                 if last is None:

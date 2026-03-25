@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import tempfile
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pytest
 
@@ -137,9 +137,9 @@ class TestAuditSubscriber:
             fill_price=150.0,
             fill_quantity=10,
             strategy_id="test",
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
         )
-        await bus.publish(FillEvent(fill=fill, timestamp=datetime.utcnow()))
+        await bus.publish(FillEvent(fill=fill, timestamp=datetime.now(timezone.utc)))
         await asyncio.sleep(0.05)  # let drain tasks process
 
         events = store.replay(event_types=["FillEvent"])
@@ -164,7 +164,7 @@ class TestAuditSubscriber:
             symbol="AAPL",
             direction=1.0,
             confidence=0.8,
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
         ))
         await asyncio.sleep(0.05)
 
@@ -190,15 +190,15 @@ class TestAuditSubscriber:
             fill_price=300.0,
             fill_quantity=5,
             strategy_id="test",
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
         )
-        await bus.publish(FillEvent(fill=fill, timestamp=datetime.utcnow()))
+        await bus.publish(FillEvent(fill=fill, timestamp=datetime.now(timezone.utc)))
         await bus.publish(SignalEvent(
             strategy_id="ml",
             symbol="MSFT",
             direction=-1.0,
             confidence=0.6,
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
         ))
         await asyncio.sleep(0.05)
 
@@ -243,7 +243,7 @@ class TestRiskEnginePriceLookup:
             fill_price=180.0,
             fill_quantity=10,
             strategy_id="test",
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
         )
         positions.apply_fill(fill)
 
@@ -261,7 +261,7 @@ class TestRiskEnginePriceLookup:
             fill_price=150.0,
             fill_quantity=10,
             strategy_id="test",
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
         )
         positions.apply_fill(fill)
 

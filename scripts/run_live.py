@@ -206,12 +206,19 @@ async def startup() -> None:
 
     try:
         await asyncio.gather(server.serve(), *tasks)
-    except asyncio.CancelledError:
+    except (asyncio.CancelledError, KeyboardInterrupt):
         pass
     finally:
         logger.info("shutdown.started")
+        # Cancel all background tasks so they don't outlive the finally block
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        server.should_exit = True
         await execution.disconnect()
         await feed.disconnect()
+        event_store.save_snapshot(positions.snapshot())
         event_store.close()
         logger.info("shutdown.complete")
 

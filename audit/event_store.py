@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from dataclasses import asdict
 from typing import TYPE_CHECKING, Optional
 
@@ -85,7 +85,7 @@ class EventStore:
             return
 
         event_type = type(event).__name__
-        timestamp = getattr(event, "timestamp", datetime.utcnow())
+        timestamp = getattr(event, "timestamp", datetime.now(timezone.utc))
 
         try:
             # Serialize: convert dataclass to dict, handle nested dataclasses
@@ -166,8 +166,8 @@ class EventStore:
                         pos.quantity,
                         pos.avg_entry_price,
                         pos.strategy_id,
-                        pos.opened_at.isoformat() if pos.opened_at else datetime.utcnow().isoformat(),
-                        pos.updated_at.isoformat() if pos.updated_at else datetime.utcnow().isoformat(),
+                        pos.opened_at.isoformat() if pos.opened_at else datetime.now(timezone.utc).isoformat(),
+                        pos.updated_at.isoformat() if pos.updated_at else datetime.now(timezone.utc).isoformat(),
                     ),
                 )
             # Remove flat positions (quantity == 0) so the snapshot stays clean

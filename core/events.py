@@ -20,7 +20,7 @@ Event flow:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from core.models import Bar, Fill, Order, OrderStatus
@@ -34,7 +34,7 @@ from core.models import Bar, Fill, Order, OrderStatus
 class MarketDataEvent:
     """Emitted by AlpacaWSFeed (live) or HistoricalFeed (backtest) for each bar."""
     bar: Bar
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     @property
     def symbol(self) -> str:
@@ -51,7 +51,7 @@ class StaleDataEvent:
     symbol: str
     last_bar_timestamp: datetime
     seconds_since_last_bar: float
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 # ---------------------------------------------------------------------------
@@ -70,7 +70,7 @@ class SignalEvent:
     symbol: str
     direction: float    # -1.0 to +1.0
     confidence: float   # 0.0 to 1.0
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     reason: Optional[str] = None  # human-readable explanation
 
     def __post_init__(self):
@@ -92,14 +92,14 @@ class OrderRequestEvent:
     OrderApprovedEvent or OrderBlockedEvent.
     """
     order: Order
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 @dataclass(frozen=True)
 class OrderApprovedEvent:
     """Risk check passed. OMS has submitted the order to execution."""
     order: Order
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 @dataclass(frozen=True)
@@ -111,7 +111,7 @@ class OrderBlockedEvent:
     """
     order: Order
     reason: str
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 @dataclass(frozen=True)
@@ -124,7 +124,7 @@ class OrderStatusEvent:
     symbol: str
     old_status: OrderStatus
     new_status: OrderStatus
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 # ---------------------------------------------------------------------------
@@ -138,7 +138,7 @@ class FillEvent:
     Consumed by: PositionTracker, PerformanceTracker, AuditLog, Dashboard.
     """
     fill: Fill
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     @property
     def symbol(self) -> str:
@@ -164,7 +164,7 @@ class RiskAlertEvent:
     message: str
     current_value: float
     threshold: float
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 # ---------------------------------------------------------------------------
@@ -180,7 +180,7 @@ class GreeksEvent:
     vega: float
     theta: float
     rho: float
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 # ---------------------------------------------------------------------------
@@ -195,4 +195,4 @@ class SystemEvent:
     """
     event_type: str
     message: str
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
