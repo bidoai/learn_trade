@@ -22,7 +22,10 @@ import json
 import sqlite3
 from datetime import datetime
 from dataclasses import asdict
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from core.models import Position
 
 import structlog
 
@@ -37,6 +40,17 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type);
 CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
+"""
+
+_CREATE_POSITIONS_TABLE = """
+CREATE TABLE IF NOT EXISTS positions (
+    symbol          TEXT PRIMARY KEY,
+    quantity        REAL NOT NULL,
+    avg_entry_price REAL NOT NULL,
+    strategy_id     TEXT NOT NULL,
+    opened_at       TEXT NOT NULL,
+    updated_at      TEXT NOT NULL
+);
 """
 
 
@@ -56,6 +70,7 @@ class EventStore:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")  # faster, still safe with WAL
         self._conn.executescript(_CREATE_TABLE)
+        self._conn.executescript(_CREATE_POSITIONS_TABLE)
         self._conn.commit()
         logger.info("event_store.initialized", db_path=self.db_path)
 
@@ -125,6 +140,66 @@ class EventStore:
             {"event_type": r[0], "timestamp": r[1], "payload": json.loads(r[2])}
             for r in rows
         ]
+
+    def save_snapshot(self, positions: "list[Position]") -> None:
+        """
+        Upsert current positions. Called after every fill so the DB always
+        reflects the latest in-memory state. Safe to call with an empty list
+        (leaves existing rows untouched).
+        """
+        if self._conn is None:
+            return
+        try:
+            for pos in positions:
+                self._conn.execute(
+                    """
+                    INSERT INTO positions (symbol, quantity, avg_entry_price, strategy_id, opened_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(symbol) DO UPDATE SET
+                        quantity        = excluded.quantity,
+                        avg_entry_price = excluded.avg_entry_price,
+                        strategy_id     = excluded.strategy_id,
+                        updated_at      = excluded.updated_at
+                    """,
+                    (
+                        pos.symbol,
+                        pos.quantity,
+                        pos.avg_entry_price,
+                        pos.strategy_id,
+                        pos.opened_at.isoformat() if pos.opened_at else datetime.utcnow().isoformat(),
+                        pos.updated_at.isoformat() if pos.updated_at else datetime.utcnow().isoformat(),
+                    ),
+                )
+            # Remove flat positions (quantity == 0) so the snapshot stays clean
+            self._conn.execute("DELETE FROM positions WHERE quantity = 0")
+            self._conn.commit()
+        except sqlite3.OperationalError as e:
+            logger.warning("event_store.save_snapshot_failed", error=str(e))
+
+    def load_snapshot(self) -> "list[Position]":
+        """
+        Load persisted positions on startup so state survives restarts.
+        Returns an empty list if no positions are stored.
+        """
+        if self._conn is None:
+            return []
+        from core.models import Position
+        rows = self._conn.execute(
+            "SELECT symbol, quantity, avg_entry_price, strategy_id, opened_at, updated_at FROM positions WHERE quantity != 0"
+        ).fetchall()
+        result = []
+        for symbol, quantity, avg_entry_price, strategy_id, opened_at_str, updated_at_str in rows:
+            pos = Position(
+                symbol=symbol,
+                quantity=quantity,
+                avg_entry_price=avg_entry_price,
+                strategy_id=strategy_id,
+                opened_at=datetime.fromisoformat(opened_at_str),
+                updated_at=datetime.fromisoformat(updated_at_str),
+            )
+            result.append(pos)
+        logger.info("event_store.snapshot_loaded", count=len(result))
+        return result
 
     def close(self) -> None:
         if self._conn:
