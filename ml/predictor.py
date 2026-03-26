@@ -71,40 +71,54 @@ def predict(
         # Apply the same scaler fitted during training
         x_scaled = model.scaler.transform(x)
 
-        # predict_proba returns [[p_down, p_up]]
+        # predict_proba shape: (1, n_classes)
         proba = model.classifier.predict_proba(x_scaled)[0]
-        p_up = float(proba[1])   # probability that next close > current close
 
     except Exception:
         logger.exception("predictor.inference_error")
         return None
 
-    direction  = (p_up - 0.5) * 2
-    confidence = abs(p_up - 0.5) * 2
+    n_classes = model.n_classes
+
+    if n_classes == 3:
+        # Ternary label: classes are [0=down, 1=flat, 2=up]
+        # Map class indices to classifier's classes_ ordering
+        classes = list(model.classifier.classes_)
+        p_down = float(proba[classes.index(0)]) if 0 in classes else 0.0
+        p_flat = float(proba[classes.index(1)]) if 1 in classes else 0.0
+        p_up   = float(proba[classes.index(2)]) if 2 in classes else 0.0
+
+        # Direction: weighted sum of up vs down probability
+        direction  = float(p_up - p_down)                  # in [-1, +1]
+        confidence = max(p_up, p_down) - 1.0 / n_classes   # excess above chance
+    else:
+        # Binary: classes are [0=down, 1=up]
+        p_up = float(proba[-1])
+        direction  = (p_up - 0.5) * 2
+        confidence = abs(p_up - 0.5) * 2
+
+    confidence = max(0.0, min(1.0, confidence))
 
     if confidence < MIN_CONFIDENCE:
         logger.debug(
             "predictor.low_confidence_suppressed",
-            p_up=round(p_up, 4),
+            direction=round(direction, 4),
             confidence=round(confidence, 4),
             threshold=MIN_CONFIDENCE,
         )
         return None
 
-    # Clamp to [-1, 1] and [0, 1] defensively (math should guarantee this)
-    direction  = max(-1.0, min(1.0, direction))
-    confidence = max(0.0,  min(1.0, confidence))
+    direction = max(-1.0, min(1.0, direction))
 
-    # Guard against NaN (shouldn't happen with sklearn, but be explicit)
     if np.isnan(direction) or np.isnan(confidence):
-        logger.warning("predictor.nan_output", p_up=p_up)
+        logger.warning("predictor.nan_output")
         return None
 
     logger.debug(
         "predictor.signal",
-        p_up=round(p_up, 4),
         direction=round(direction, 4),
         confidence=round(confidence, 4),
+        n_classes=n_classes,
     )
 
     return direction, confidence

@@ -48,6 +48,10 @@ class RiskSettings(BaseModel):
     max_concentration_pct: float = 0.20   # max 20% in any single symbol
     var_confidence: float = 0.95          # 95% VaR
     var_window_days: int = 20             # rolling window for VaR
+    max_var_pct: float = 0.02            # block orders if VaR > 2% of capital
+    max_drawdown_pct: float = 0.10       # halt all trading if drawdown > 10%
+    stop_loss_pct: float = 0.05          # per-position stop-loss at 5% loss
+    limit_order_ttl_sec: int = 30        # cancel stale limit orders after 30s
     stale_data_timeout_sec: int = 60      # halt signals after 60s no data
 
 
@@ -62,6 +66,7 @@ class StrategySettings(BaseModel):
     # ML strategy
     ml_lookback: int = 100
     ml_retrain_interval_bars: int = 500  # retrain every N bars
+    ml_label_threshold: float = 0.001   # dead zone for ternary label (±0.1%)
     # Portfolio allocation weights (must sum to 1.0)
     strategy_weights: dict = {
         "momentum": 0.40,

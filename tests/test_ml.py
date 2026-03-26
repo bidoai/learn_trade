@@ -101,11 +101,11 @@ class TestFeatureBuilder:
         assert len(df) < len(enough_bars)
         assert len(df) > 0
 
-    def test_label_is_binary(self, enough_bars):
-        """Label column must be 0.0 or 1.0 only."""
+    def test_label_is_ternary(self, enough_bars):
+        """Label column must contain only 0.0 (down), 1.0 (flat), or 2.0 (up)."""
         cutoff = enough_bars[-1].timestamp
         df = features.build(enough_bars, cutoff_date=cutoff)
-        assert set(df[LABEL_COL].unique()).issubset({0.0, 1.0})
+        assert set(df[LABEL_COL].unique()).issubset({0.0, 1.0, 2.0})
 
     def test_build_latest_returns_series(self, enough_bars):
         """build_latest() returns a pandas Series with FEATURE_COLS."""
@@ -209,20 +209,15 @@ class TestPredictor:
             assert 0.0 <= confidence <= 1.0
 
     def test_predict_direction_confidence_relationship(self, trained_model, many_bars):
-        """
-        High-confidence predictions should have direction far from zero.
-        direction = (p - 0.5) * 2, confidence = |p - 0.5| * 2
-        So |direction| == confidence always.
-        """
+        """Confidence must be in [0, 1] and direction in [-1, 1]."""
         feature_vec = features.build_latest(many_bars)
         assert feature_vec is not None
 
         result = predictor.predict(trained_model, feature_vec)
         if result is not None:
             direction, confidence = result
-            import math
-            # |direction| should approximately equal confidence
-            assert math.isclose(abs(direction), confidence, rel_tol=1e-6)
+            assert -1.0 <= direction <= 1.0
+            assert 0.0 <= confidence <= 1.0
 
 
 # ── MLStrategy ────────────────────────────────────────────────────────────

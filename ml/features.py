@@ -17,13 +17,20 @@ Features (all derived from OHLCV bars, no external data):
   return_20     : log return over 20 bars
   volatility_10 : rolling std of 1-bar returns, window=10
   volatility_20 : rolling std of 1-bar returns, window=20
+  vol_regime    : volatility_5 / volatility_20  — <1 = compression, >1 = expansion
   rsi_14        : Relative Strength Index, period=14
   volume_ratio  : current volume / 20-bar average volume
   hl_ratio      : (high - low) / close  — intrabar range as % of price
   close_pos     : (close - low) / (high - low)  — where close falls in the bar
+  obv_trend     : sign of OBV slope over 10 bars — buying/selling pressure
+  gap_open      : (open - prev_close) / prev_close — overnight gap
+  body_size     : abs(close - open) / (high - low) — candle conviction
+  stoch_k       : (close - min_low_14) / (max_high_14 - min_low_14) — stochastic %K
+  vpt_5         : volume-price trend over 5 bars — normalized
 
 Label (for training only):
-  next_return_positive : 1 if next bar close > current close, else 0
+  Ternary: 2 = strong up (> +threshold), 1 = flat, 0 = strong down (< -threshold)
+  threshold = ml_label_threshold (default 0.001 = 0.1%)
   The last row always has NaN label (no next bar yet) — drop before training.
 
 Data flow:
@@ -63,20 +70,29 @@ FEATURE_COLS = [
     "return_20",
     "volatility_10",
     "volatility_20",
+    "vol_regime",
     "rsi_14",
     "volume_ratio",
     "hl_ratio",
     "close_pos",
+    "obv_trend",
+    "gap_open",
+    "body_size",
+    "stoch_k",
+    "vpt_5",
 ]
 
 LABEL_COL = "label"
+
+# Default label threshold: moves < ±0.1% are labelled "flat" (class 1)
+DEFAULT_LABEL_THRESHOLD = 0.001
 
 # Minimum bars required before any feature row is valid
 # (max lookback is 20, plus we need 1 extra bar for the label)
 MIN_BARS_FOR_TRAINING = 22
 
 
-def build(bars: List[Bar], cutoff_date: datetime) -> pd.DataFrame:
+def build(bars: List[Bar], cutoff_date: datetime, label_threshold: float = DEFAULT_LABEL_THRESHOLD) -> pd.DataFrame:
     """
     Build a feature DataFrame from a list of OHLCV bars.
 
@@ -140,6 +156,9 @@ def build(bars: List[Bar], cutoff_date: datetime) -> pd.DataFrame:
     df["volatility_10"] = df["return_1"].rolling(10).std()
     df["volatility_20"] = df["return_1"].rolling(20).std()
 
+    vol_5 = df["return_1"].rolling(5).std()
+    df["vol_regime"] = (vol_5 / df["volatility_20"].replace(0, np.nan)).clip(0.1, 5.0)
+
     df["rsi_14"] = _rsi(df["close"], period=14)
 
     vol_ma = df["volume"].rolling(20).mean()
@@ -149,13 +168,38 @@ def build(bars: List[Bar], cutoff_date: datetime) -> pd.DataFrame:
     df["hl_ratio"]  = hl / df["close"]
     df["close_pos"] = (df["close"] - df["low"]) / hl.replace(0, np.nan)
 
-    # ── Label: 1 if next close > current close, else 0 ────────────────────
+    # OBV trend: sign of OBV slope over 10 bars
+    obv = (np.sign(df["return_1"]) * df["volume"]).cumsum()
+    df["obv_trend"] = np.sign(obv.diff(10))
+
+    # Overnight gap: (open - prev_close) / prev_close
+    df["gap_open"] = (df["open"] - df["close"].shift(1)) / df["close"].shift(1).replace(0, np.nan)
+    df["gap_open"] = df["gap_open"].fillna(0.0)
+
+    # Candle body ratio: conviction of the directional move
+    df["body_size"] = (df["close"] - df["open"]).abs() / hl.replace(0, np.nan)
+    df["body_size"] = df["body_size"].clip(0.0, 1.0)
+
+    # Stochastic %K: where close falls within the 14-bar high-low range
+    low_14  = df["low"].rolling(14).min()
+    high_14 = df["high"].rolling(14).max()
+    df["stoch_k"] = ((df["close"] - low_14) / (high_14 - low_14).replace(0, np.nan)).clip(0.0, 1.0)
+
+    # Volume-price trend over 5 bars, normalized by mean volume
+    vpt = (df["return_1"] * df["volume"]).rolling(5).sum()
+    mean_vol = df["volume"].rolling(20).mean().replace(0, np.nan)
+    df["vpt_5"] = vpt / mean_vol
+
+    # ── Ternary label: 2=up, 1=flat, 0=down ───────────────────────────────
     # shift(-1) looks at the NEXT bar's close — valid for training because
     # we only label rows where the next bar is in our training window.
     # The last row gets NaN (no next bar) and is dropped below.
-    next_close = df["close"].shift(-1)
-    df[LABEL_COL] = (next_close > df["close"]).astype(float)
-    df.loc[df[LABEL_COL].isna(), LABEL_COL] = np.nan  # keep NaN explicit
+    next_return = df["close"].shift(-1) / df["close"] - 1
+    label = pd.Series(1.0, index=df.index)  # default: flat
+    label[next_return > label_threshold]  = 2.0
+    label[next_return < -label_threshold] = 0.0
+    label[next_return.isna()] = np.nan
+    df[LABEL_COL] = label
 
     # Drop NaN label (last row) and NaN features (warmup rows)
     result = df[FEATURE_COLS + [LABEL_COL]].dropna()

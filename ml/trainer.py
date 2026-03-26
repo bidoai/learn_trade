@@ -45,6 +45,7 @@ from typing import Optional
 
 import numpy as np
 import structlog
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.preprocessing import StandardScaler
@@ -66,12 +67,16 @@ class TrainedModel:
     The same scaler is applied to live features at prediction time.
     Fitting the scaler on all data (including test) is another form
     of look-ahead bias — avoided here by pairing scaler + model.
+
+    The classifier is wrapped in CalibratedClassifierCV so that
+    predict_proba() outputs are true probabilities, not raw scores.
     """
-    classifier: GradientBoostingClassifier
+    classifier: CalibratedClassifierCV
     scaler: StandardScaler
     n_training_rows: int
     cv_accuracy: Optional[float]  # mean CV accuracy across folds
     feature_cols: list[str]       # column order the model expects
+    n_classes: int = 2            # 2 for binary, 3 for ternary label
 
 
 def train(df) -> Optional[TrainedModel]:
@@ -99,28 +104,46 @@ def train(df) -> Optional[TrainedModel]:
 
     X = df[FEATURE_COLS].values
     y = df[LABEL_COL].values.astype(int)
+    n_classes = len(np.unique(y))
 
     # ── Cross-validation (for logging/monitoring, not for model selection) ──
     cv_accuracy = _cross_validate(X, y)
 
-    # ── Train final model on ALL available data ────────────────────────────
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
+    # ── Train final model on all-but-last-20% of data ──────────────────────
+    # Reserve last 20% for calibration (must not overlap with training)
+    split_idx = int(len(X) * 0.8)
+    X_train, X_cal = X[:split_idx], X[split_idx:]
+    y_train, y_cal = y[:split_idx], y[split_idx:]
 
-    clf = GradientBoostingClassifier(
+    if len(X_cal) < 10:
+        # Insufficient data for split — fall back to using all data (no calibration)
+        X_train, X_cal = X, X
+        y_train, y_cal = y, y
+
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_cal_scaled   = scaler.transform(X_cal)
+
+    base_clf = GradientBoostingClassifier(
         n_estimators=100,
         max_depth=3,          # shallow trees → less overfitting
         learning_rate=0.05,   # smaller steps → more robust
         subsample=0.8,        # row sampling → more robust
         random_state=42,
     )
-    clf.fit(X_scaled, y)
+    base_clf.fit(X_train_scaled, y_train)
+
+    # Wrap with isotonic calibration on the held-out calibration set.
+    # Pass cv=None to use "prefit" mode (base_clf already trained above).
+    clf = CalibratedClassifierCV(estimator=base_clf, method="isotonic", cv=None)
+    clf.fit(X_cal_scaled, y_cal)
 
     logger.info(
         "trainer.model_trained",
         n_training_rows=len(df),
+        n_classes=n_classes,
         cv_accuracy=round(cv_accuracy, 4) if cv_accuracy is not None else None,
-        n_estimators=clf.n_estimators_,
+        calibration_rows=len(X_cal),
     )
 
     return TrainedModel(
@@ -129,6 +152,7 @@ def train(df) -> Optional[TrainedModel]:
         n_training_rows=len(df),
         cv_accuracy=cv_accuracy,
         feature_cols=FEATURE_COLS,
+        n_classes=n_classes,
     )
 
 

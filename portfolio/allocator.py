@@ -28,6 +28,7 @@ from core.event_bus import EventBus
 from core.events import OrderRequestEvent, SignalEvent
 from core.models import Order, OrderSide, OrderType, Position
 from oms.position_tracker import PositionTracker
+from portfolio.performance_tracker import StrategyPerformanceTracker
 
 logger = structlog.get_logger(__name__)
 
@@ -39,11 +40,13 @@ class PortfolioAllocator:
         positions: PositionTracker,
         event_bus: EventBus,
         last_prices: dict[str, float],
+        performance_tracker: Optional[StrategyPerformanceTracker] = None,
     ) -> None:
         self.settings = settings
         self.positions = positions
         self.bus = event_bus
         self.last_prices = last_prices  # shared dict updated by data feed
+        self.performance_tracker = performance_tracker
         self._signal_queue = event_bus.subscribe(SignalEvent)
 
     async def run(self) -> None:
@@ -65,8 +68,12 @@ class PortfolioAllocator:
             )
             return None
 
-        # Capital allocated to this strategy
-        weight = self.settings.strategy_weights.get(signal.strategy_id, 0.0)
+        # Capital allocated to this strategy (vol-scaled if tracker available)
+        if self.performance_tracker is not None:
+            weights = self.performance_tracker.get_scaled_weights()
+        else:
+            weights = self.settings.strategy_weights
+        weight = weights.get(signal.strategy_id, 0.0)
         allocated_capital = self.settings.initial_capital * weight
 
         current_pos = self.positions.get(signal.symbol)

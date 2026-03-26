@@ -27,6 +27,7 @@ logic runs even if an exception occurs mid-check.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 import structlog
@@ -80,16 +81,84 @@ class OrderManager:
     # ------------------------------------------------------------------
 
     async def run_order_requests(self) -> None:
-        """Process incoming order requests."""
+        """Process incoming order requests. Also enforces limit order TTL."""
+        iteration = 0
         while True:
             event: OrderRequestEvent = await self._request_queue.get()
             await self._handle_order_request(event)
+            # Check for stale limit orders every 10 processed requests
+            iteration += 1
+            if iteration % 10 == 0:
+                await self._check_stale_orders()
 
     async def run_fill_processing(self) -> None:
         """Process incoming fills from execution engine."""
         while True:
             event: FillEvent = await self._fill_queue.get()
             await self._handle_fill(event)
+
+    # ------------------------------------------------------------------
+    # Stale order enforcement
+    # ------------------------------------------------------------------
+
+    async def _check_stale_orders(self) -> None:
+        """
+        Cancel limit orders older than limit_order_ttl_sec.
+        Expire market orders stuck open for more than 60s (execution issue).
+        Called periodically from run_order_requests.
+        """
+        now = datetime.now(timezone.utc)
+        ttl_sec = getattr(self.risk.settings, "limit_order_ttl_sec", 30)
+
+        for order in list(self.order_book.open_orders()):
+            age_sec = (now - order.created_at).total_seconds()
+            from core.models import OrderType, OrderStatus
+
+            if order.order_type == OrderType.LIMIT and age_sec > ttl_sec:
+                logger.info(
+                    "oms.limit_order_expired",
+                    order_id=order.order_id,
+                    symbol=order.symbol,
+                    age_sec=round(age_sec, 1),
+                    ttl_sec=ttl_sec,
+                )
+                if self._execution:
+                    await self._execution.cancel(order.order_id)
+                order.status = OrderStateMachine.transition(order.status, OrderStatus.CANCELLED)
+                await self.bus.publish(
+                    OrderStatusEvent(
+                        order_id=order.order_id,
+                        symbol=order.symbol,
+                        old_status=OrderStatus.OPEN,
+                        new_status=OrderStatus.CANCELLED,
+                    )
+                )
+
+            elif order.order_type != OrderType.LIMIT and age_sec > 60:
+                logger.warning(
+                    "oms.market_order_stuck",
+                    order_id=order.order_id,
+                    symbol=order.symbol,
+                    age_sec=round(age_sec, 1),
+                )
+                order.status = OrderStateMachine.transition(order.status, OrderStatus.EXPIRED)
+                await self.bus.publish(
+                    OrderStatusEvent(
+                        order_id=order.order_id,
+                        symbol=order.symbol,
+                        old_status=OrderStatus.OPEN,
+                        new_status=OrderStatus.EXPIRED,
+                    )
+                )
+
+    async def check_stops(self) -> None:
+        """
+        Check all open positions for stop-loss breaches and submit closing orders.
+        Call this periodically (e.g., on each market data event).
+        """
+        stop_orders = self.risk.get_stop_loss_orders()
+        for order in stop_orders:
+            await self.bus.publish(OrderRequestEvent(order=order))
 
     # ------------------------------------------------------------------
     # Order request handling
